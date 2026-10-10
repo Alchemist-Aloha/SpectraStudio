@@ -458,6 +458,50 @@ fn compute_frame(
         state.y_range,
         (width, height),
     );
+    let mut layout = layout;
+    // A crosshair whose coordinate lands on a tick would write two numbers on
+    // top of each other. The crosshair's number is the more precise one, so the
+    // tick steps aside; the axis keeps every other tick it had.
+    if scene.show_crosshair {
+        if let Some((x, y)) = state.hover {
+            if let Some(pixel) = layout
+                .viewport(state.x_range, state.y_range, x_scale, y_scale)
+                .data_to_pixel(x, y)
+            {
+                let tolerance = scene.style.tick_label_size.max(6.0) as f64 * 2.5;
+                let x_pixels: Vec<f64> = layout
+                    .x_ticks
+                    .iter()
+                    .filter_map(|tick| {
+                        layout_viewport_x(&layout, state, x_scale, y_scale, *tick)
+                    })
+                    .collect();
+                let keep_x: Vec<f64> = layout
+                    .x_ticks
+                    .iter()
+                    .zip(x_pixels.iter())
+                    .filter(|(_, px)| (**px - pixel.0).abs() > tolerance)
+                    .map(|(tick, _)| *tick)
+                    .collect();
+                layout.x_ticks = keep_x;
+                let y_pixels: Vec<f64> = layout
+                    .y_ticks
+                    .iter()
+                    .filter_map(|tick| {
+                        layout_viewport_y(&layout, state, x_scale, y_scale, *tick)
+                    })
+                    .collect();
+                let keep_y: Vec<f64> = layout
+                    .y_ticks
+                    .iter()
+                    .zip(y_pixels.iter())
+                    .filter(|(_, px)| (**px - pixel.1).abs() > tolerance)
+                    .map(|(tick, _)| *tick)
+                    .collect();
+                layout.y_ticks = keep_y;
+            }
+        }
+    }
     let viewport = layout.viewport(state.x_range, state.y_range, x_scale, y_scale);
 
     let mut panel = scene.panel.clone();
@@ -509,6 +553,34 @@ fn compute_frame(
         y_range: state.y_range,
         show_grid,
     }
+}
+
+/// Where a tick lands on the x axis, in plot pixels.
+fn layout_viewport_x(
+    layout: &ta_plot::PanelLayout,
+    state: &PlotState,
+    x_scale: Scale,
+    y_scale: Scale,
+    tick: f64,
+) -> Option<f64> {
+    layout
+        .viewport(state.x_range, state.y_range, x_scale, y_scale)
+        .data_to_pixel(tick, state.y_range.0)
+        .map(|pixel| pixel.0)
+}
+
+/// Where a tick lands on the y axis, in plot pixels.
+fn layout_viewport_y(
+    layout: &ta_plot::PanelLayout,
+    state: &PlotState,
+    x_scale: Scale,
+    y_scale: Scale,
+    tick: f64,
+) -> Option<f64> {
+    layout
+        .viewport(state.x_range, state.y_range, x_scale, y_scale)
+        .data_to_pixel(state.x_range.0, tick)
+        .map(|pixel| pixel.1)
 }
 
 /// The recorded width and height: the plate's device size, so the two agree.

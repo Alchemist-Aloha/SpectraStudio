@@ -22,6 +22,10 @@ pub mod text;
 
 use text::{parse_numeric_lines, read_to_string, require_uniform_width};
 
+pub use export::{
+    write_axis, write_blocks, write_matrix, write_series, Delimiter, ExportOptions, MatrixExport,
+    Series, SeriesBlock,
+};
 pub use project_file::{load_project, save_project, LoadedProject};
 
 /// What a TA sheet's axes and matrix are measured in, when the file does not

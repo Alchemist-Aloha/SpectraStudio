@@ -89,6 +89,7 @@ impl Sampling {
         }
     }
 
+    #[allow(dead_code)] // the label is shown by the plates' captions
     pub fn label(&self) -> &'static str {
         match self.mode {
             SampleMode::Nearest => "nearest",
@@ -128,7 +129,15 @@ pub struct Session {
     pub comparison_wavelengths: Vec<f64>,
     /// Extra delays overlaid in the spectra plate.
     pub comparison_delays: Vec<f64>,
+    /// Which comparison workspace the comparison layout is showing.
+    pub comparison: usize,
     pub sampling: Sampling,
+    /// The fitting workbench's state, created when it is first opened.
+    pub fit: Option<crate::fit_panel::FitSession>,
+    /// The current automatic time-zero estimate, before it is applied.
+    pub estimated_curve: Option<ta_core::CorrectionCurve>,
+    /// The figure FigureStudio is editing, carried over from a plate.
+    pub studio: Option<ta_core::FigureModel>,
     pub status: Status,
     /// Where the project was last saved.
     pub path: Option<std::path::PathBuf>,
@@ -152,7 +161,11 @@ impl Session {
             spectrum: None,
             comparison_wavelengths: Vec::new(),
             comparison_delays: Vec::new(),
+            comparison: 0,
             sampling: Sampling::default(),
+            fit: None,
+            estimated_curve: None,
+            studio: None,
             status: Status::default(),
             path: None,
             dirty: false,
@@ -199,6 +212,24 @@ impl Session {
         self.status.info(format!("{name}: {rows} wavelengths × {delays} delays"));
         self.dirty = true;
         id
+    }
+
+    /// Puts an already-loaded dataset on the bench, without re-importing it.
+    pub fn open_bench(&mut self, id: DatasetId) {
+        let Ok(dataset) = self.project.dataset(id) else {
+            self.status.problem("that dataset is no longer in the project");
+            return;
+        };
+        let version = dataset.active_version;
+        let name = dataset.name.clone();
+        let rows = dataset.wavelength().len();
+        let delays = dataset.delay().len();
+        self.opened = Some(id);
+        self.version = Some(version);
+        self.comparison_wavelengths.clear();
+        self.comparison_delays.clear();
+        self.reseed_selection();
+        self.status.info(format!("{name}: {rows} wavelengths × {delays} delays"));
     }
 
     /// Chooses the strongest wavelength and the first positive delay.
@@ -503,6 +534,70 @@ impl Session {
                 transient_spectrum(dataset, &selection).ok()
             })
             .collect()
+    }
+
+    /// The kinetic records the kinetics plate draws, in the order it draws
+    /// them: the kept comparison curves first, the linked trace last.
+    pub fn kinetics_records(&self) -> Vec<ta_core::PlotSeries> {
+        let Some(dataset) = self.dataset() else {
+            return Vec::new();
+        };
+        let Some(template) = self.trace.clone() else {
+            return Vec::new();
+        };
+        let mut records = Vec::new();
+        for wavelength in self
+            .comparison_wavelengths
+            .iter()
+            .chain(std::iter::once(&template.wavelength.coordinate))
+        {
+            let selection = TraceSelection {
+                id: template.id,
+                dataset: template.dataset,
+                version: template.version,
+                wavelength: self.sampling.request(*wavelength),
+            };
+            if kinetic_trace(dataset, &selection).is_ok() {
+                let label = kinetic_trace(dataset, &selection)
+                    .map(|trace| trace.label)
+                    .unwrap_or_default();
+                records.push(ta_core::PlotSeries::new(
+                    label,
+                    ta_core::SeriesSource::Trace(selection),
+                ));
+            }
+        }
+        records
+    }
+
+    /// The spectral records the spectra plate draws, in its own order.
+    pub fn spectra_records(&self) -> Vec<ta_core::PlotSeries> {
+        let Some(dataset) = self.dataset() else {
+            return Vec::new();
+        };
+        let Some(template) = self.spectrum.clone() else {
+            return Vec::new();
+        };
+        let mut records = Vec::new();
+        for delay in self
+            .comparison_delays
+            .iter()
+            .chain(std::iter::once(&template.delay.coordinate))
+        {
+            let selection = SpectrumSelection {
+                id: template.id,
+                dataset: template.dataset,
+                version: template.version,
+                delay: self.sampling.request(*delay),
+            };
+            if let Ok(spectrum) = transient_spectrum(dataset, &selection) {
+                records.push(ta_core::PlotSeries::new(
+                    spectrum.label,
+                    ta_core::SeriesSource::Spectrum(selection),
+                ));
+            }
+        }
+        records
     }
 
     // -- the signature move: the ranked caption ---------------------------

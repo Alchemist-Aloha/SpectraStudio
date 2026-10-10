@@ -93,6 +93,9 @@ pub struct Project {
     pub datasets: Vec<TaDataset>,
     pub comparisons: Vec<ComparisonWorkspace>,
     pub figures: Vec<FigureModel>,
+    /// Named parameter sets the user kept, so a fit can be repeated elsewhere.
+    #[serde(default)]
+    pub presets: Vec<crate::fitting::ParameterPreset>,
     /// The window's panel arrangement. Opaque to the data layer: the interface
     /// owns its own chrome.
     pub layout: Option<serde_json::Value>,
@@ -106,6 +109,7 @@ impl Project {
             datasets: Vec::new(),
             comparisons: Vec::new(),
             figures: Vec::new(),
+            presets: Vec::new(),
             layout: None,
         }
     }

@@ -13,7 +13,7 @@ use crate::axis::Axis;
 use crate::error::{CoreError, Result};
 use crate::figure::FigureModel;
 use crate::fitting::FitResult;
-use crate::ids::{DatasetId, VersionId};
+use crate::ids::{DatasetId, VersionId, FitId};
 use crate::processing::{MatrixVersion, ProcessingOp, VersionKind};
 use crate::selection::{SpectrumSelection, TraceSelection};
 use crate::units::SignalUnit;
@@ -251,6 +251,11 @@ impl TaDataset {
 
     pub fn shape_of(&self, version: VersionId) -> Result<(usize, usize)> {
         Ok(self.block(version)?.shape())
+    }
+
+    /// A retained fitting session.
+    pub fn fit(&self, id: FitId) -> Option<&FitResult> {
+        self.fits.iter().find(|fit| fit.id == id)
     }
 
     pub fn version(&self, id: VersionId) -> Result<&MatrixVersion> {

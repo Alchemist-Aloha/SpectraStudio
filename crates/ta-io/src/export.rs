@@ -138,12 +138,109 @@ pub fn write_series(path: &Path, series: &Series, options: ExportOptions) -> Res
     writer.flush().map_err(io(path))
 }
 
+/// One curve in a multi-series export.
+///
+/// Curves measured on different grids cannot share a table without one of them
+/// being interpolated, so a multi-series file is written as labelled blocks: one
+/// `x`/`y` pair per curve, each at its own resolution. Nothing is resampled, and
+/// the file says which curve is which.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeriesBlock {
+    pub label: String,
+    pub x_label: String,
+    pub y_label: String,
+    pub x: Vec<f64>,
+    pub y: Vec<f64>,
+}
+
+impl SeriesBlock {
+    pub fn new(
+        label: impl Into<String>,
+        x_label: impl Into<String>,
+        y_label: impl Into<String>,
+        x: Vec<f64>,
+        y: Vec<f64>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            x_label: x_label.into(),
+            y_label: y_label.into(),
+            x,
+            y,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.x.len().min(self.y.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Writes several curves into one self-describing file: the notes first, then a
+/// `# series:` line and a header for each block.
+///
+/// Returns how many points were written.
+pub fn write_blocks(
+    path: &Path,
+    blocks: &[SeriesBlock],
+    notes: &[String],
+    options: ExportOptions,
+) -> Result<usize> {
+    let mut writer = create(path)?;
+    let separator = options.delimiter.as_char();
+    for note in notes {
+        writeln!(writer, "# {note}").map_err(io(path))?;
+    }
+    let mut written = 0usize;
+    for block in blocks {
+        writeln!(writer, "# series: {}", block.label).map_err(io(path))?;
+        if options.header {
+            writeln!(writer, "{}{separator}{}", block.x_label, block.y_label).map_err(io(path))?;
+        }
+        for index in 0..block.len() {
+            writeln!(
+                writer,
+                "{}{separator}{}",
+                format_number(block.x[index], options.precision),
+                format_number(block.y[index], options.precision),
+            )
+            .map_err(io(path))?;
+            written += 1;
+        }
+        writeln!(writer).map_err(io(path))?;
+    }
+    writer.flush().map_err(io(path))?;
+    Ok(written)
+}
+
+/// Writes an axis as its own file, which §18 wants beside a matrix.
+pub fn write_axis(path: &Path, axis: &Axis, options: ExportOptions) -> Result<()> {
+    let mut writer = create(path)?;
+    if options.header {
+        writeln!(writer, "{} ({})", axis.name(), axis.unit().symbol()).map_err(io(path))?;
+    }
+    for value in axis.values() {
+        writeln!(writer, "{}", format_number(*value, options.precision)).map_err(io(path))?;
+    }
+    writer.flush().map_err(io(path))
+}
+
 /// A matrix on its way out, with the axes that make its numbers meaningful.
 pub struct MatrixExport<'a> {
     pub wavelength: &'a Axis,
     pub delay: &'a Axis,
     pub data: &'a Array2<f64>,
     pub unit: SignalUnit,
+    /// The wavelengths to write, or every one. §18's "only the visible range".
+    pub rows: Option<Vec<usize>>,
+    /// The delays to write, or every one.
+    pub columns: Option<Vec<usize>>,
+    /// Lines written above the table: what the numbers are and where they came
+    /// from, because a file that cannot describe itself is not reproducible.
+    pub notes: Vec<String>,
 }
 
 /// Writes a matrix as a labelled table: one row per wavelength, one column per
@@ -165,32 +262,55 @@ pub fn write_matrix(path: &Path, export: &MatrixExport<'_>, options: ExportOptio
     let mut writer = create(path)?;
     let separator = options.delimiter.as_char();
 
+    for note in &export.notes {
+        writeln!(writer, "# {note}").map_err(io(path))?;
+    }
+
+    let rows: Vec<usize> = export
+        .rows
+        .clone()
+        .unwrap_or_else(|| (0..rows).collect());
+    let columns: Vec<usize> = export
+        .columns
+        .clone()
+        .unwrap_or_else(|| (0..columns).collect());
+    if rows.iter().any(|row| *row >= export.data.nrows())
+        || columns.iter().any(|column| *column >= export.data.ncols())
+    {
+        return Err(CoreError::ShapeMismatch {
+            rows: export.data.nrows(),
+            cols: export.data.ncols(),
+            wavelengths: rows.len(),
+            delays: columns.len(),
+        });
+    }
+
     if options.header {
         write!(writer, "{} ({})", export.wavelength.name(), export.wavelength.unit().symbol())
             .map_err(io(path))?;
-        for delay in export.delay.values() {
+        for column in &columns {
             write!(
                 writer,
                 "{separator}{}",
-                format_number(*delay, options.precision)
+                format_number(export.delay.values()[*column], options.precision)
             )
             .map_err(io(path))?;
         }
         writeln!(writer).map_err(io(path))?;
     }
 
-    for row in 0..rows {
+    for row in &rows {
         write!(
             writer,
             "{}",
-            format_number(export.wavelength.values()[row], options.precision)
+            format_number(export.wavelength.values()[*row], options.precision)
         )
         .map_err(io(path))?;
-        for column in 0..columns {
+        for column in &columns {
             write!(
                 writer,
                 "{separator}{}",
-                format_number(export.data[[row, column]], options.precision)
+                format_number(export.data[[*row, *column]], options.precision)
             )
             .map_err(io(path))?;
         }
@@ -210,6 +330,97 @@ mod tests {
         let mut path = std::env::temp_dir();
         path.push(format!("ta-export-test-{}-{name}", std::process::id()));
         path
+    }
+
+    #[test]
+    fn a_multi_series_export_keeps_each_curve_at_its_own_resolution() {
+        let path = temp_path("blocks.csv");
+        let blocks = vec![
+            SeriesBlock::new(
+                "sample A · 600 nm",
+                "Delay (ps)",
+                "ΔOD",
+                vec![-1.0, 0.0, 1.0],
+                vec![0.0, 0.1, 0.05],
+            ),
+            SeriesBlock::new(
+                "sample B · 700 nm",
+                "Time (ps)",
+                "ΔOD",
+                vec![0.0, 2.0],
+                vec![0.2, 0.1],
+            ),
+        ];
+        let notes = vec!["project: test".to_string(), "version: cropped".to_string()];
+        let written = write_blocks(&path, &blocks, &notes, ExportOptions::default()).unwrap();
+        assert_eq!(written, 5);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# project: test\n# version: cropped\n"));
+        assert!(text.contains("# series: sample A · 600 nm"));
+        assert!(text.contains("# series: sample B · 700 nm"));
+        // Each block keeps its own delay column, which is the point.
+        assert!(text.contains("Time (ps),ΔOD"));
+        assert!(text.contains("2.000000,0.100000"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_matrix_export_can_write_one_window_and_its_own_provenance() {
+        let wavelength = Axis::new(
+            AxisKind::Wavelength,
+            AxisUnit::Nanometer,
+            "Wavelength",
+            vec![400.0, 500.0, 600.0],
+        )
+        .unwrap();
+        let delay = Axis::new(
+            AxisKind::Delay,
+            AxisUnit::Picosecond,
+            "Delay",
+            vec![0.0, 1.0],
+        )
+        .unwrap();
+        let data = array![[1.0, 2.0], [3.0, f64::NAN], [5.0, 6.0]];
+        let path = temp_path("window.csv");
+        write_matrix(
+            &path,
+            &MatrixExport {
+                wavelength: &wavelength,
+                delay: &delay,
+                data: &data,
+                unit: SignalUnit::DeltaOpticalDensity,
+                rows: Some(vec![1, 2]),
+                columns: Some(vec![1]),
+                notes: vec!["figure: contour".to_string()],
+            },
+            ExportOptions::default(),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# figure: contour\n"));
+        let lines: Vec<&str> = text.lines().collect();
+        // One heading naming the single delay, and two rows.
+        assert_eq!(lines[1], "Wavelength (nm),1.000000");
+        assert_eq!(lines.len(), 4);
+        assert!(lines[2].contains("nan"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn an_axis_can_be_written_on_its_own() {
+        let axis = Axis::new(
+            AxisKind::Delay,
+            AxisUnit::Picosecond,
+            "Delay",
+            vec![-1.0, 0.0, 1.0],
+        )
+        .unwrap();
+        let path = temp_path("axis.csv");
+        write_axis(&path, &axis, ExportOptions::default()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 4);
+        assert!(text.starts_with("Delay (ps)"));
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -253,6 +464,9 @@ mod tests {
         write_matrix(
             &path,
             &MatrixExport {
+                rows: None,
+                columns: None,
+                notes: Vec::new(),
                 wavelength: &wavelength,
                 delay: &delay,
                 data: &data,
@@ -312,6 +526,9 @@ mod tests {
         assert!(write_matrix(
             &path,
             &MatrixExport {
+                rows: None,
+                columns: None,
+                notes: Vec::new(),
                 wavelength: &wavelength,
                 delay: &delay,
                 data: &data,

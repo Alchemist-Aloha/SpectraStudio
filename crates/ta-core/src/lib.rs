@@ -36,11 +36,12 @@ pub use figure::{
     AnnotationKind, AnnotationSpec, AutoRange, AxisModel, AxisScale, ColorLimits, Colormap,
     ColorbarSpec, ContourSpec, DashPattern, ExportFormat, ExportSpec, FigureModel, FigureSize,
     JournalPreset, LegendPosition, LegendSpec, LengthUnit, MarkerShape, PanelModel, PanelRect,
-    PlotSeries, PublicationStyle, Rgba, SeriesKind, SeriesSource, SeriesStyle, TickDirection,
+    PlotSeries, PublicationStyle, Rgba, SeriesKind, SeriesSource, SeriesStyle,
+    SeriesTransform, TickDirection,
 };
 pub use fitting::{
-    legacy_parameter_template, FitModelKind, FitParameter, FitResult, FitStats, ResidualData,
-    Weighting,
+    legacy_parameter_template, FitModelKind, FitParameter, FitResult, FitStats, ParameterPreset,
+    ResidualData, Weighting,
 };
 pub use ids::{
     AnnotationId, ComparisonId, DatasetId, FigureId, FitId, SeriesId, VersionId,

@@ -29,10 +29,17 @@ pub fn style() -> PublicationStyle {
     }
 }
 
-/// The plate's panel description and its curves.
+/// The plate's panel description, its curves, and the *records* those curves
+/// came from.
+///
+/// The records are what FigureStudio and a comparison need: a reference to a
+/// dataset and a coordinate rather than a copy of the numbers. Keeping them
+/// here, beside the curves they produced, is why the studio opens on exactly
+/// what the plate was showing.
 pub struct PlateContent {
     pub panel: PanelModel,
     pub series: Vec<PlottedSeries>,
+    pub records: Vec<ta_core::PlotSeries>,
 }
 
 /// The accent the cursors and the crosshair use.
@@ -94,14 +101,17 @@ pub fn contour_spec(session: &Session) -> ContourSpec {
 /// (a) the contour: the matrix as an image, ruled by its isolines.
 pub fn contour_content(session: &Session, spec: &ContourSpec) -> PlateContent {
     let mut panel = PanelModel::new("");
-    panel.x = axis_model("Wavelength", Some("nm"), AxisScale::Linear);
+    panel.x = axis("Wavelength", Some("nm"), AxisScale::Linear);
     // The delay axis of the contour stays linear: a contour is read for the
     // shape of the whole matrix, and the logarithmic view belongs to the trace.
-    panel.y = axis_model("Delay", Some("ps"), AxisScale::Linear);
+    panel.y = axis("Delay", Some("ps"), AxisScale::Linear);
     panel.contour = Some(spec.clone());
     // A contour is read through its colour bar, not a legend.
     panel.legend.visible = false;
 
+    // A contour is drawn from the matrix, not from a series, so it carries no
+    // records: the studio names the matrix instead.
+    let records = Vec::new();
     let mut series = Vec::new();
     if let (Some(dataset), Some(version)) = (session.dataset(), session.version_id()) {
         if let (Ok((wavelength, delay)), Ok(matrix)) = (dataset.axes(version), dataset.matrix(version))
@@ -110,7 +120,7 @@ pub fn contour_content(session: &Session, spec: &ContourSpec) -> PlateContent {
             panel.y.range = Some(delay.range());
             if spec.show_lines {
                 let Ok(grid) = ContourGrid::from_matrix(wavelength, delay, matrix) else {
-                    return PlateContent { panel, series };
+                    return PlateContent { panel, series, records };
                 };
                 let boundaries = ta_plot::colormap::band_levels(
                     &spec.limits,
@@ -130,15 +140,20 @@ pub fn contour_content(session: &Session, spec: &ContourSpec) -> PlateContent {
             }
         }
     }
-    PlateContent { panel, series }
+    PlateContent {
+        panel,
+        series,
+        records,
+    }
 }
 
 /// (b) kinetics: the kept comparison curves and the linked trace.
 pub fn kinetics_content(session: &Session) -> PlateContent {
     let mut panel = PanelModel::new("");
-    panel.x = axis_model("Delay", Some("ps"), AxisScale::SplitLinearLog { break_at: 1.0 });
-    panel.y = axis_model("ΔOD", None, AxisScale::Linear);
+    panel.x = axis("Delay", Some("ps"), AxisScale::SplitLinearLog { break_at: 1.0 });
+    panel.y = axis("ΔOD", None, AxisScale::Linear);
     let traces = session.kinetics();
+    let records = session.kinetics_records();
     let mut series = Vec::new();
     let mut bounds: Option<(f64, f64)> = None;
     for (index, trace) in traces.iter().enumerate() {
@@ -174,15 +189,20 @@ pub fn kinetics_content(session: &Session) -> PlateContent {
         let pad = ((high - low).abs() * 0.08).max(1e-4);
         panel.y.range = Some((low - pad, high + pad));
     }
-    PlateContent { panel, series }
+    PlateContent {
+        panel,
+        series,
+        records,
+    }
 }
 
 /// (c) spectra: the kept comparison curves and the linked spectrum.
 pub fn spectra_content(session: &Session) -> PlateContent {
     let mut panel = PanelModel::new("");
-    panel.x = axis_model("Wavelength", Some("nm"), AxisScale::Linear);
-    panel.y = axis_model("ΔOD", None, AxisScale::Linear);
+    panel.x = axis("Wavelength", Some("nm"), AxisScale::Linear);
+    panel.y = axis("ΔOD", None, AxisScale::Linear);
     let spectra = session.spectra();
+    let records = session.spectra_records();
     let mut series = Vec::new();
     let mut bounds: Option<(f64, f64)> = None;
     for (index, spectrum) in spectra.iter().enumerate() {
@@ -213,20 +233,25 @@ pub fn spectra_content(session: &Session) -> PlateContent {
         let pad = ((high - low).abs() * 0.08).max(1e-4);
         panel.y.range = Some((low - pad, high + pad));
     }
-    PlateContent { panel, series }
+    PlateContent {
+        panel,
+        series,
+        records,
+    }
 }
 
 /// (d) the time-zero correction curve, when the chain holds one.
 pub fn time_zero_content(session: &Session) -> PlateContent {
     let mut panel = PanelModel::new("");
-    panel.x = axis_model("Wavelength", Some("nm"), AxisScale::Linear);
-    panel.y = axis_model("Time zero", Some("ps"), AxisScale::Linear);
+    panel.x = axis("Wavelength", Some("nm"), AxisScale::Linear);
+    panel.y = axis("Time zero", Some("ps"), AxisScale::Linear);
     panel.legend.visible = false;
 
     let Some(dataset) = session.dataset() else {
         return PlateContent {
             panel,
             series: Vec::new(),
+            records: Vec::new(),
         };
     };
     let curve = dataset
@@ -249,6 +274,7 @@ pub fn time_zero_content(session: &Session) -> PlateContent {
         return PlateContent {
             panel,
             series: Vec::new(),
+            records: Vec::new(),
         };
     };
     let sorted = curve.sorted();
@@ -267,9 +293,22 @@ pub fn time_zero_content(session: &Session) -> PlateContent {
         marker: ta_core::MarkerShape::Circle,
         ..line_style(warm(), 1.5)
     };
+    // The correction curve is handed over as its own numbers: it is not a
+    // selection of a matrix, it is the operation's own data.
+    let records = vec![ta_core::PlotSeries::new(
+        "correction",
+        ta_core::SeriesSource::Curve {
+            x: sorted.iter().map(|point| point.wavelength).collect(),
+            y: sorted.iter().map(|point| point.time_zero).collect(),
+            x_label: "Wavelength".into(),
+            y_label: "Time zero".into(),
+            unit: ta_core::SignalUnit::DeltaOpticalDensity,
+        },
+    )];
     PlateContent {
         panel,
         series: vec![PlottedSeries::new("correction", points, style)],
+        records,
     }
 }
 
@@ -283,7 +322,7 @@ pub fn content(session: &Session, plate: PlateId, spec: &ContourSpec) -> PlateCo
     }
 }
 
-fn axis_model(label: &str, unit: Option<&str>, scale: AxisScale) -> AxisModel {
+pub fn axis(label: &str, unit: Option<&str>, scale: AxisScale) -> AxisModel {
     AxisModel {
         label: label.to_string(),
         unit: unit.map(|unit| unit.to_string()),
@@ -292,6 +331,7 @@ fn axis_model(label: &str, unit: Option<&str>, scale: AxisScale) -> AxisModel {
         reversed: false,
         major_ticks: Some(6),
         minor_ticks: false,
+        mirror: false,
         grid: true,
         tick_label_size: 9.0,
         title_size: 10.0,

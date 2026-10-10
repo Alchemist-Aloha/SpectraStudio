@@ -6,6 +6,7 @@
 //! tabular coordinates with the clickable address of what is selected.
 
 use crate::plates::{self, PlateContent};
+use crate::widgets;
 use crate::session::{PlateId, Sampling, Session};
 use gpui_kit::component::{h_resizable, resizable_panel, v_resizable};
 // Imported by name rather than by glob: `gpui_kit::*` also brings in gpui's
@@ -31,6 +32,7 @@ const CAPTION_HEIGHT: f32 = 46.0;
 /// The direction's palette.
 pub mod ink {
     use gpui_kit::Hsla;
+    use ta_core::Rgba;
 
     /// Paper white: the plate ground.
     pub fn paper() -> Hsla {
@@ -64,6 +66,19 @@ pub mod ink {
         rgb(226, 230, 238)
     }
 
+    /// A data colour as a UI colour, for the swatches that name a series.
+    pub fn hsla(color: Rgba) -> Hsla {
+        let rgba = gpui_kit::Rgba {
+            r: color.r as f32 / 255.0,
+            g: color.g as f32 / 255.0,
+            b: color.b as f32 / 255.0,
+            a: color.a as f32 / 255.0,
+        };
+        let mut value: Hsla = rgba.into();
+        value.a = 1.0;
+        value
+    }
+
     fn rgb(r: u8, g: u8, b: u8) -> Hsla {
         let rgba = gpui_kit::Rgba {
             r: r as f32 / 255.0,
@@ -77,16 +92,53 @@ pub mod ink {
     }
 }
 
+/// The export formats, re-exported so the shell and the studio agree on one
+/// list.
+pub use ta_core::ExportFormat;
+
+/// The layouts of the window: one dataset at a time, several at once, the
+/// publication editor, and the fitting workbench.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    Figure,
+    Compare,
+    Studio,
+    Fit,
+}
+
+impl Layout {
+    pub const ALL: [Layout; 4] = [Layout::Figure, Layout::Compare, Layout::Studio, Layout::Fit];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Layout::Figure => "Figure",
+            Layout::Compare => "Compare",
+            Layout::Studio => "FigureStudio",
+            Layout::Fit => "FitWorkbench",
+        }
+    }
+
+    /// What the layout is for, in the one line the header shows.
+    pub const fn note(self) -> &'static str {
+        match self {
+            Layout::Figure => "one dataset, four linked plates",
+            Layout::Compare => "many objects, native coordinates",
+            Layout::Studio => "the same figure model, at publication size",
+            Layout::Fit => "kinetics and their model, off the UI thread",
+        }
+    }
+}
+
 /// The workspace view.
 pub struct Workspace {
     pub session: Session,
     /// One interactive plate per panel of the figure block.
-    plates: Vec<Plate>,
+    pub plates: Vec<Plate>,
     /// The colour-mapped contour image, shared with the plates because each
     /// builds its own image during prepaint, at its own plot size.
-    raster: SharedHeatmapCache,
+    pub raster: SharedHeatmapCache,
     /// What the contour's image is made from, rebuilt when the matrix changes.
-    contour_source: Option<std::rc::Rc<HeatmapSource>>,
+    pub contour_source: Option<std::rc::Rc<HeatmapSource>>,
     /// Bumped whenever the project changed, so the scenes are rebuilt once.
     revision: u64,
     built: u64,
@@ -100,6 +152,25 @@ pub struct Workspace {
     /// from the new axes instead of keeping the one they had, which is what a
     /// selection change must do and a dataset change must not.
     rehome: bool,
+    /// The layout the window is showing.
+    pub layout: Layout,
+    /// The two comparison panes.
+    pub compare_plates: Vec<Plate>,
+    /// What "add the selection" adds to a comparison.
+    pub compare_target: crate::compare::SeriesTarget,
+    /// The workbench's data plate and its residual plate.
+    pub fit_plates: Vec<Plate>,
+    /// Every editable number in the interface, keyed by what it edits.
+    pub fields: crate::widgets::Fields,
+    /// The caption under each comparison pane and the workbench.
+    pub compare_caption: (String, String),
+    pub fit_caption: String,
+    /// Which plate the studio was opened on, which decides what it exports.
+    pub current_plate: PlateId,
+    /// The studio's preview plate: the figure drawn at its own physical size.
+    pub studio_plates: Vec<Plate>,
+    /// Whether a data export writes the visible window or everything measured.
+    pub studio_visible_only: bool,
 }
 
 impl Workspace {
@@ -116,17 +187,27 @@ impl Workspace {
             contour_series: None,
             contour_key: None,
             rehome: true,
+            layout: Layout::Figure,
+            compare_plates: Vec::new(),
+            compare_target: crate::compare::SeriesTarget::Trace,
+            fit_plates: Vec::new(),
+            fields: crate::widgets::Fields::default(),
+            compare_caption: (String::new(), String::new()),
+            fit_caption: String::new(),
+            current_plate: PlateId::Kinetics,
+            studio_plates: Vec::new(),
+            studio_visible_only: true,
         };
         workspace.build();
         workspace
     }
 
-    fn touch(&mut self) {
+    pub(crate) fn touch(&mut self) {
         self.revision += 1;
     }
 
     /// A different matrix is on the bench: the plates refit to its axes.
-    fn touch_matrix(&mut self) {
+    pub(crate) fn touch_matrix(&mut self) {
         self.contour_key = None;
         self.rehome = true;
         self.touch();
@@ -161,9 +242,11 @@ impl Workspace {
         let views = plates::style();
         self.ensure_contour(&spec);
         self.ensure_contour_source(&spec);
+        let rehome = self.rehome;
+        let raster = self.raster.clone();
+
+        // The four plates of the single-dataset layout.
         for (index, plate_id) in PlateId::ALL.iter().enumerate() {
-            // The contour reuses its cached isolines; the linked plates are
-            // cheap enough to rebuild every time.
             let content = if *plate_id == PlateId::Contour {
                 PlateContent {
                     panel: self
@@ -171,48 +254,216 @@ impl Workspace {
                         .clone()
                         .unwrap_or_else(|| ta_core::PanelModel::new("")),
                     series: self.contour_series.clone().unwrap_or_default(),
+                    records: Vec::new(),
                 }
             } else {
                 plates::content(&self.session, *plate_id, &spec)
             };
-            let (x_range, y_range) = default_ranges(&content.panel);
-            let previous = self
-                .plates
-                .get(index)
-                .map(|plate| plate.state.borrow().clone())
-                .unwrap_or_else(|| PlotState::new(x_range, y_range));
             let heatmap = if *plate_id == PlateId::Contour {
                 self.contour_source.clone()
             } else {
                 None
             };
-            let scene = PanelScene {
-                panel: content.panel,
-                style: views.clone(),
-                series: content.series,
+            let scene = scene_of(
+                content,
+                views.clone(),
                 heatmap,
-                background: Rgba::rgb(255, 255, 255),
-                cursors: plates::cursors(&self.session, *plate_id),
-                show_crosshair: true,
-                accent: plates::accent(),
-            };
-            match self.plates.get_mut(index) {
-                Some(plate) => {
-                    // The frame is kept: the element compares the drawing inputs
-                    // itself and only re-renders when one of them changed.
-                    plate.set_scene(scene);
-                    if self.rehome {
-                        plate.state.borrow_mut().set_home(x_range, y_range);
-                    }
-                }
-                None => self
-                    .plates
-                    .push(Plate::new(scene, previous, self.raster.clone())),
-            }
+                plates::cursors(&self.session, *plate_id),
+                true,
+            );
+            sync_plate(&mut self.plates, index, scene, raster.clone(), rehome);
             self.caption_of[index] = self.session.caption(*plate_id);
         }
+
+        // The comparison layout: spectra, then kinetics.
+        for (index, spectra) in [true, false].into_iter().enumerate() {
+            let content = crate::compare::pane_content(&self.session, spectra, views.clone());
+            let scene = scene_of(content, views.clone(), None, Vec::new(), true);
+            sync_plate(&mut self.compare_plates, index, scene, raster.clone(), rehome);
+        }
+
+        // The workbench: the data with its fit, then the residuals.
+        if let Some((data, residuals)) = crate::fit_panel::fit_content(&self.session) {
+            let scene = scene_of(data, views.clone(), None, Vec::new(), true);
+            sync_plate(&mut self.fit_plates, 0, scene, raster.clone(), rehome);
+            match residuals {
+                Some(residuals) => {
+                    let scene = scene_of(residuals, views.clone(), None, Vec::new(), true);
+                    sync_plate(&mut self.fit_plates, 1, scene, raster.clone(), rehome);
+                }
+                None => self.fit_plates.truncate(1),
+            }
+        } else {
+            self.fit_plates.clear();
+        }
+        self.fit_caption = crate::fit_panel::fit_caption(&self.session);
+        match self.studio_preview() {
+            Some(content) => {
+                let scene = scene_of(content, views.clone(), None, Vec::new(), false);
+                sync_plate(&mut self.studio_plates, 0, scene, raster.clone(), true);
+            }
+            None => self.studio_plates.clear(),
+        }
+        self.compare_caption = (
+            self.session.comparison_caption(false),
+            self.session.comparison_caption(true),
+        );
+
         self.rehome = false;
         self.built = self.revision;
+    }
+
+    /// Seeds the comparison with what is loaded, for a window that opens
+    /// directly into the comparison layout.
+    pub fn seed_comparison(&mut self) {
+        self.session.comparison_mut();
+        if self.session.comparison_series().is_empty() {
+            let _ = self.session.add_every_dataset();
+        }
+    }
+
+    /// Fits the current selection once, synchronously.
+    ///
+    /// The interactive path runs on the background executor; this exists for a
+    /// smoke test that has no window loop to post an answer back to, and for a
+    /// scripted check of the fitted curve's drawing.
+    pub fn fit_once(&mut self) -> ta_fitting::Result<ta_core::FitResult> {
+        let (request, trace) = self
+            .session
+            .fit_request()
+            .map_err(|error| ta_fitting::FitError::Invalid(format!("{error}")))?;
+        let result = ta_fitting::fit_trace(&trace, &request)?;
+        self.session.retain_fit(result.clone()).map_err(|error| {
+            ta_fitting::FitError::Invalid(format!("the fit could not be stored: {error}"))
+        })?;
+        self.session.fit_session().result = Some(result.clone());
+        self.session.fit_session().state = crate::fit_panel::FitState::Done;
+        Ok(result)
+    }
+
+    /// Applies an edit to one editable number, wherever it was typed.
+    pub fn on_field_change(&mut self, id: crate::widgets::FieldId, text: &str, cx: &mut Context<Self>) {
+        use crate::widgets::FieldId;
+        match id {
+            FieldId::Wavelength => {
+                let values = crate::widgets::parse_numbers(text);
+                // The last one is the linked trace; the rest are overlays,
+                // which is what "one or more wavelengths" means.
+                self.session.comparison_wavelengths =
+                    values.iter().copied().take(values.len().saturating_sub(1)).collect();
+                if let Some(coordinate) = values.last() {
+                    if let Err(error) = self.session.select_wavelength(*coordinate) {
+                        self.session.status.problem(format!("{error}"));
+                    }
+                }
+                self.touch();
+            }
+            FieldId::Delay => {
+                let values = crate::widgets::parse_numbers(text);
+                self.session.comparison_delays =
+                    values.iter().copied().take(values.len().saturating_sub(1)).collect();
+                if let Some(coordinate) = values.last() {
+                    if let Err(error) = self.session.select_delay(*coordinate) {
+                        self.session.status.problem(format!("{error}"));
+                    }
+                }
+                self.touch();
+            }
+            FieldId::HalfWidth => {
+                if let Some(value) = crate::widgets::parse_number(text) {
+                    let mut sampling = self.session.sampling;
+                    sampling.half_width = value.abs();
+                    self.set_sampling(sampling);
+                }
+            }
+            FieldId::Channels => {
+                if let Some(value) = crate::widgets::parse_number(text) {
+                    let mut sampling = self.session.sampling;
+                    sampling.channels = (value.abs() as usize).max(1);
+                    self.set_sampling(sampling);
+                }
+            }
+            FieldId::SeriesLabel(index) => {
+                if let Some(series) = self.session.comparison_series_at_mut(index) {
+                    series.label = text.trim().to_string();
+                }
+                self.touch();
+            }
+            FieldId::SeriesScale(index) => {
+                if let Some(value) = crate::widgets::parse_number(text) {
+                    if let Some(series) = self.session.comparison_series_at_mut(index) {
+                        series.display.scale = value;
+                    }
+                }
+                self.touch();
+            }
+            FieldId::SeriesOffset(index) => {
+                if let Some(value) = crate::widgets::parse_number(text) {
+                    if let Some(series) = self.session.comparison_series_at_mut(index) {
+                        series.display.offset = value;
+                    }
+                }
+                self.touch();
+            }
+            FieldId::SeriesShift(index) => {
+                if let Some(value) = crate::widgets::parse_number(text) {
+                    if let Some(series) = self.session.comparison_series_at_mut(index) {
+                        series.display.coordinate_offset = value;
+                    }
+                }
+                self.touch();
+            }
+            FieldId::FitValue(index) => {
+                if let Some(value) = crate::widgets::parse_number(text) {
+                    if let Some(fit) = self.session.fit.as_mut() {
+                        if let Some(parameter) = fit.parameters.get_mut(index) {
+                            parameter.value = value;
+                        }
+                    }
+                }
+            }
+            FieldId::FitBounds(index) => {
+                let (low, high) = crate::widgets::parse_bounds(text);
+                if let Some(fit) = self.session.fit.as_mut() {
+                    if let Some(parameter) = fit.parameters.get_mut(index) {
+                        parameter.min = low;
+                        parameter.max = high;
+                    }
+                }
+            }
+            FieldId::FitRange => {
+                let range = crate::widgets::parse_range(text).map(|(low, high)| {
+                    (low, if high.is_finite() { high } else { f64::MAX })
+                });
+                if let Some(fit) = self.session.fit.as_mut() {
+                    fit.fit_range = range;
+                }
+            }
+            FieldId::FitExcluded => {
+                let intervals = crate::widgets::parse_intervals(text);
+                if let Some(fit) = self.session.fit.as_mut() {
+                    fit.excluded = intervals;
+                }
+            }
+            FieldId::FitReferenceDelay => {}
+            FieldId::FigureWidth
+            | FieldId::FigureHeight
+            | FieldId::FigureFontSize
+            | FieldId::FigureTickSize
+            | FieldId::LegendFontSize
+            | FieldId::AxisXLabel
+            | FieldId::AxisYLabel
+            | FieldId::AxisXRange
+            | FieldId::AxisYRange
+            | FieldId::ContourMin
+            | FieldId::ContourMax
+            | FieldId::ContourLevels
+            | FieldId::AnnotationText
+            | FieldId::AnnotationX
+            | FieldId::AnnotationY
+            | FieldId::LegendLabel(_) => self.on_figure_field(id, text),
+        }
+        cx.notify();
     }
 
     /// Rebuilds what the contour's image is made from.
@@ -590,8 +841,9 @@ impl Workspace {
             .child(text.to_uppercase())
     }
 
-    fn plate_block(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    fn plate_block(&mut self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let plate_id = PlateId::ALL[index];
+        self.current_plate = plate_id;
         let caption = self.caption_of[index].clone();
         let letter = plate_id.letter().to_string();
         let plate = &self.plates[index];
@@ -633,10 +885,28 @@ impl Workspace {
                             )
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
                                     .text_size(px(11.0))
                                     .text_color(ink::text())
                                     .child(caption),
-                            ),
+                            )
+                            // §17.1: the studio is reachable from every plot, so
+                            // the way in is on the plate rather than in a menu.
+                            .child(widgets::action_id(
+                                "studio",
+                                ElementId::Name(format!("studio-{letter}").into()),
+                                false,
+                                cx,
+                                move |workspace, _, _| workspace.open_studio(plate_id),
+                            ))
+                            .child(widgets::action_id(
+                                "data",
+                                ElementId::Name(format!("data-{letter}").into()),
+                                false,
+                                cx,
+                                move |workspace, _, _| workspace.export_plate_data(plate_id),
+                            )),
                     )
                     .h(px(CAPTION_HEIGHT)),
             )
@@ -698,7 +968,7 @@ impl Workspace {
         }
     }
 
-    fn inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let sampling = self.session.sampling;
         let trace = self
             .session
@@ -719,6 +989,37 @@ impl Workspace {
             .unwrap_or_else(|_| "—".to_string());
         let limits = plates::colour_limits(&self.session);
 
+        // The two coordinates are typeset here as well as read out: a figure
+        // is often wanted at exactly 620 nm, not at whatever the pointer found.
+        let wavelength_state = self.field_state(
+            widgets::FieldId::Wavelength,
+            trace.clone(),
+            "600, 620, 700",
+            window,
+            cx,
+        );
+        let delay_state = self.field_state(
+            widgets::FieldId::Delay,
+            spectrum.clone(),
+            "-1, 1, 100",
+            window,
+            cx,
+        );
+        let half_width_state = self.field_state(
+            widgets::FieldId::HalfWidth,
+            format!("{:.2}", sampling.half_width),
+            "5",
+            window,
+            cx,
+        );
+        let channels_state = self.field_state(
+            widgets::FieldId::Channels,
+            format!("{}", sampling.channels),
+            "3",
+            window,
+            cx,
+        );
+
         div()
             .w(px(INSPECTOR_WIDTH))
             .h_full()
@@ -727,11 +1028,34 @@ impl Workspace {
             .bg(ink::ground())
             .border_l_1()
             .border_color(ink::rule())
-            .child(self.section_label("Caption and control".to_string()))
+            .child(self.section_label("Selection".to_string()))
+            .child(self.field(
+                "Wavelengths (nm)",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(widgets::number_input(&wavelength_state, 250.0))
+                    .child(widgets::readout(
+                        "the last is the linked trace; the rest are overlaid",
+                    )),
+            ))
+            .child(self.field(
+                "Delays (ps)",
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(widgets::number_input(&delay_state, 250.0))
+                    .child(widgets::readout(
+                        "the last is the linked spectrum; negatives are kept",
+                    )),
+            ))
             .child(self.field(
                 "Reading",
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap_1()
                     .children(
                         [
@@ -777,7 +1101,7 @@ impl Workspace {
                                 .bg(if active { ink::accent() } else { ink::paper() })
                                 .border_1()
                                 .border_color(if active { ink::accent() } else { ink::rule() })
-                                                    .child(label)
+                                .child(label)
                                 .on_click(cx.listener(move |workspace, _event, _window, cx| {
                                     workspace.set_sampling(chosen);
                                     cx.notify();
@@ -788,16 +1112,14 @@ impl Workspace {
             ))
             .child(self.field(
                 "Window",
-                // The mode's own name, so the reading is stated in words.
                 div()
-                    .text_size(px(12.0))
-                    .text_color(ink::muted())
-                    .child(format!(
-                        "{} · ± {:.1} nm · {} channels",
-                        sampling.label(),
-                        sampling.half_width,
-                        sampling.channels
-                    )),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(widgets::number_input(&half_width_state, 62.0))
+                    .child(widgets::readout("nm ±"))
+                    .child(widgets::number_input(&channels_state, 48.0))
+                    .child(widgets::readout("channels")),
             ))
             .child(self.field(
                 "Trace",
@@ -805,36 +1127,24 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(ink::text())
-                            .child(trace_label),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(ink::muted())
-                            .child(format!("selected at {trace} nm")),
-                    ),
+                    .child(widgets::value_text(trace_label))
+                    .child(widgets::readout(format!("sampled at {trace} nm"))),
             ))
             .child(self.field(
                 "Spectrum",
-                div()
-                    .text_size(px(12.0))
-                    .text_color(ink::text())
-                    .child(format!("selected at {spectrum} ps")),
+                widgets::readout(format!("sampled at {spectrum} ps")),
             ))
             .child(self.field(
                 "Colour limits",
-                div()
-                    .text_size(px(12.0))
-                    .text_color(ink::muted())
-                    .child(format!("{:.4} … {:.4} ΔOD, symmetric", limits.min, limits.max)),
+                widgets::readout(format!(
+                    "{:.4} … {:.4} ΔOD, symmetric",
+                    limits.min, limits.max
+                )),
             ))
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap_2()
                     .p_3()
                     .child(self.inspector_action("Keep trace", cx, |workspace| {
@@ -844,13 +1154,14 @@ impl Workspace {
                     .child(self.inspector_action("Keep spectrum", cx, |workspace| {
                         let _ = workspace.session.save_current_spectrum();
                         workspace.touch();
-                    })),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .px_3()
+                    }))
+                    .child(self.inspector_action("Fit this trace", cx, |workspace| {
+                        workspace.open_fit();
+                    }))
+                    .child(self.inspector_action("FigureStudio…", cx, |workspace| {
+                        let plate = workspace.current_plate;
+                        workspace.open_studio(plate);
+                    }))
                     .child(self.inspector_action("Reset view", cx, |workspace| {
                         for plate in &workspace.plates {
                             plate.reset_view();
@@ -966,11 +1277,16 @@ impl Render for Workspace {
         if self.built != self.revision {
             self.refresh_scenes();
         }
-        let contour = self.plate_block(0, cx);
-        let kinetics = self.plate_block(1, cx);
-        let spectra = self.plate_block(2, cx);
-        let time_zero = self.plate_block(3, cx);
-
+        // The coordinate fields follow the selection, so a click on a plate
+        // writes the number the user would otherwise have typed.
+        self.sync_coordinate_fields(_window, cx);
+        let strip = self.layout_strip(cx);
+        let body = match self.layout {
+            Layout::Compare => self.compare_layout(_window, cx),
+            Layout::Fit => self.fit_layout(_window, cx),
+            Layout::Studio => self.studio_layout(_window, cx),
+            Layout::Figure => self.figure_layout(_window, cx),
+        };
         div()
             .size_full()
             .flex()
@@ -978,36 +1294,88 @@ impl Render for Workspace {
             .bg(ink::paper())
             .text_color(ink::text())
             .child(self.header(cx))
+            .child(strip)
+            .child(body)
+            .child(self.footer())
+    }
+}
+
+impl Workspace {
+    /// The single-dataset layout: the plate index, the figure block and the
+    /// inspector, which is what every other layout is a specialisation of.
+    fn figure_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let contour = self.plate_block(0, cx);
+        let kinetics = self.plate_block(1, cx);
+        let spectra = self.plate_block(2, cx);
+        let time_zero = self.plate_block(3, cx);
+        let inspector = self.inspector(window, cx);
+        div()
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
+            .flex()
+            .child(self.plate_index(cx))
             .child(
                 div()
                     .flex_1()
-                    .min_h(px(0.0))
-                    .flex()
-                    .child(self.plate_index(cx))
+                    .min_w(px(0.0))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .child(
-                                v_resizable("figure-block")
-                                    .child(
-                                        resizable_panel()
-                                            .size(px(430.0))
-                                            .child(contour),
-                                    )
-                                    .child(
-                                        resizable_panel().child(
-                                            h_resizable("linked-plates")
-                                                .child(resizable_panel().child(kinetics))
-                                                .child(resizable_panel().child(spectra)),
-                                        ),
-                                    )
-                                    .child(resizable_panel().size(px(240.0)).child(time_zero)),
-                            ),
-                    )
-                    .child(self.inspector(cx)),
+                        v_resizable("figure-block")
+                            .child(resizable_panel().size(px(430.0)).child(contour))
+                            .child(resizable_panel().child(
+                                h_resizable("linked-plates")
+                                    .child(resizable_panel().child(kinetics))
+                                    .child(resizable_panel().child(spectra)),
+                            ))
+                            .child(resizable_panel().size(px(240.0)).child(time_zero)),
+                    ),
             )
-            .child(self.footer())
+            .child(inspector)
+            .into_any_element()
+    }
+}
+
+/// A scene from a plate's content, so every plate is built the same way.
+fn scene_of(
+    content: PlateContent,
+    style: ta_core::PublicationStyle,
+    heatmap: Option<std::rc::Rc<HeatmapSource>>,
+    cursors: Vec<ta_plot_gpui::PlotCursor>,
+    show_crosshair: bool,
+) -> PanelScene {
+    PanelScene {
+        panel: content.panel,
+        style,
+        series: content.series,
+        heatmap,
+        background: Rgba::rgb(255, 255, 255),
+        cursors,
+        show_crosshair,
+        accent: plates::accent(),
+    }
+}
+
+/// Brings one plate in line with a scene, keeping its window unless the matrix
+/// underneath it changed.
+fn sync_plate(
+    plates: &mut Vec<Plate>,
+    index: usize,
+    scene: PanelScene,
+    raster: SharedHeatmapCache,
+    rehome: bool,
+) {
+    let (x_range, y_range) = default_ranges(&scene.panel);
+    match plates.get_mut(index) {
+        Some(plate) => {
+            plate.set_scene(scene);
+            if rehome {
+                plate.state.borrow_mut().set_home(x_range, y_range);
+            }
+        }
+        None => {
+            let state = PlotState::new(x_range, y_range);
+            plates.push(Plate::new(scene, state, raster));
+        }
     }
 }
 

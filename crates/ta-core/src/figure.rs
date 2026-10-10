@@ -321,6 +321,9 @@ pub struct AxisModel {
     pub major_ticks: Option<usize>,
     pub minor_ticks: bool,
     pub grid: bool,
+    /// Draw the opposite spine, with ticks but no second label.
+    #[serde(default)]
+    pub mirror: bool,
     pub tick_label_size: f32,
     pub title_size: f32,
 }
@@ -336,6 +339,7 @@ impl Default for AxisModel {
             major_ticks: None,
             minor_ticks: false,
             grid: false,
+            mirror: false,
             tick_label_size: 8.0,
             title_size: 8.0,
         }
@@ -416,6 +420,56 @@ impl SeriesStyle {
     }
 }
 
+/// How a series' numbers are moved for display.
+///
+/// These are display transforms: the stored matrix and the stored versions are
+/// never modified. They are recorded with the series so a comparison can be
+/// reproduced exactly, and so a normalized curve is never mistaken for data.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SeriesTransform {
+    /// Multiplies the values.
+    pub scale: f64,
+    /// Added after scaling.
+    pub offset: f64,
+    /// Added to the series' own coordinate: a trace slides along its delay
+    /// axis, a spectrum along its wavelength axis.
+    pub coordinate_offset: f64,
+}
+
+impl Default for SeriesTransform {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            offset: 0.0,
+            coordinate_offset: 0.0,
+        }
+    }
+}
+
+impl SeriesTransform {
+    pub fn is_identity(&self) -> bool {
+        self.scale == 1.0 && self.offset == 0.0 && self.coordinate_offset == 0.0
+    }
+
+    /// The transform in words, for a caption or a legend.
+    pub fn describe(&self) -> String {
+        if self.is_identity() {
+            return "as measured".to_string();
+        }
+        let mut parts = Vec::new();
+        if self.scale != 1.0 {
+            parts.push(format!("×{:.4}", self.scale));
+        }
+        if self.offset != 0.0 {
+            parts.push(format!("{:+.4}", self.offset));
+        }
+        if self.coordinate_offset != 0.0 {
+            parts.push(format!("{:+.4} on the axis", self.coordinate_offset));
+        }
+        parts.join(", ")
+    }
+}
+
 /// Where a series' numbers come from.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
@@ -478,6 +532,10 @@ pub struct PlotSeries {
     pub visible: bool,
     /// Paint order; higher is later.
     pub z: i32,
+    /// Display-only scaling and offsets. Absent in older files, where the
+    /// identity is the right answer.
+    #[serde(default)]
+    pub display: SeriesTransform,
 }
 
 impl PlotSeries {
@@ -490,6 +548,7 @@ impl PlotSeries {
             style: SeriesStyle::default(),
             visible: true,
             z: 0,
+            display: SeriesTransform::default(),
         }
     }
 }
@@ -902,6 +961,22 @@ impl FigureModel {
             JournalPreset::JacsDoubleColumn => 8.0,
             JournalPreset::Custom => self.style.base_font_size,
         };
+        self.style.base_font_size = font;
+        self.style.axis_title_size = font;
+        self.style.tick_label_size = font;
+        self.style.legend_font_size = font;
+        for panel in &mut self.panels {
+            panel.x.title_size = font;
+            panel.x.tick_label_size = font;
+            panel.y.title_size = font;
+            panel.y.tick_label_size = font;
+            panel.legend.font_size = font;
+        }
+    }
+
+    /// Sets the type size everywhere, which is what "a figure sized for one
+    /// convention and typed for another" must not be able to do.
+    pub fn set_type_size(&mut self, font: f32) {
         self.style.base_font_size = font;
         self.style.axis_title_size = font;
         self.style.tick_label_size = font;

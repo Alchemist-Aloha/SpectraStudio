@@ -112,6 +112,29 @@ impl FitParameter {
     }
 }
 
+/// A named set of starting values, bounds and fixed flags, so a fit can be
+/// repeated on another trace without retyping thirteen numbers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ParameterPreset {
+    pub name: String,
+    pub model: FitModelKind,
+    pub components: u8,
+    pub parameters: Vec<FitParameter>,
+}
+
+impl ParameterPreset {
+    /// The preset that a component count implies, which is what the reference
+    /// implementation's defaults are.
+    pub fn from_template(name: impl Into<String>, components: u8) -> Self {
+        Self {
+            name: name.into(),
+            model: FitModelKind::LegacyGaussianCdfIrf,
+            components,
+            parameters: legacy_parameter_template(components),
+        }
+    }
+}
+
 /// The starting point for the legacy model, faithful to the reference
 /// implementation's `params_init`.
 ///
