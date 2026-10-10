@@ -242,6 +242,49 @@ impl Workspace {
         self.touch();
     }
 
+    /// Writes the version on the bench as Glotaran input.
+    ///
+    /// Both files are written, because the two Glotaran generations want
+    /// different things and a user should not have to know which one their
+    /// installation reads: the legacy time-explicit ASCII, and the modern
+    /// time/spectral NetCDF dataset. The export names the version it wrote.
+    pub fn export_glotaran(&mut self) {
+        let Some(dataset) = self.session.dataset() else {
+            self.session.status.problem("no dataset is open");
+            return;
+        };
+        let Some(version) = self.session.version else {
+            self.session.status.problem("no version is on the bench");
+            return;
+        };
+        let view = match ta_glotaran::GloDataset::from_version(dataset, version) {
+            Ok(view) => view,
+            Err(error) => {
+                self.session.status.problem(format!("{error}"));
+                return;
+            }
+        };
+        let directory = self.export_directory();
+        let stem = slug(&format!("{}-glo", dataset.name));
+        let ascii_path = directory.join(format!("{stem}.ascii"));
+        let netcdf_path = directory.join(format!("{stem}.nc"));
+        match ta_glotaran::write_ascii(&view, &ascii_path) {
+            Ok(report) => {
+                let netcdf = ta_glotaran::write_netcdf(&view, &netcdf_path);
+                let extra = match netcdf {
+                    Ok(report) => format!(" and {} (NetCDF)", report.path),
+                    Err(error) => format!("; the NetCDF file failed: {error}"),
+                };
+                self.session.status.info(format!(
+                    "Glotaran input written for {}: {} rows × {} time points to {}{extra}",
+                    view.version_label, report.rows, report.columns, report.path
+                ));
+            }
+            Err(error) => self.session.status.problem(format!("{error}")),
+        }
+        self.touch();
+    }
+
     /// Opens the workbench on the current selection.
     pub fn open_fit(&mut self) {
         let _ = self.session.fit_session();

@@ -169,3 +169,31 @@ test that holds the line.
 A new divergence needs all five parts: the Python symbol, the Rust symbol, the
 difference, the reason, and the test. A divergence without a test is a bug with
 a paragraph attached.
+
+## 11. Glotaran export writes what the reference writes
+
+* **Python:** `glotaran()` writes the time-explicit ASCII file with
+  `np.savetxt(..., fmt="%s")`, so every number is Python's own `str()` of the
+  float; `pyglotaran()` builds an xarray Dataset with `time` and `spectral`
+  coordinates and a `data` variable whose first axis is time.
+* **Rust:** `ta-glotaran::ascii` writes the same file, and
+  `ta-glotaran::format::python_float` reproduces Python's float representation
+  including its plain-notation window (-4 to 16 in decimal exponents) and its
+  two-digit signed exponents. `ta-glotaran::netcdf` writes the modern dataset as
+  NetCDF-3 classic, which is the serialized form of what the reference builds in
+  memory.
+* **Why:** the file is read by another program, so its format is an interface,
+  not an internal choice. A user who has been pasting the reference's file into
+  Glotaran should be able to hand ours over unchanged.
+* **Proved by:** `ta-tests/tests/glotaran_parity.rs` compares the exported file
+  line by line against the reference's own numpy output on the repository
+  fixture, including the header, and checks every float against a table of
+  Python's answers for the values whose form is easy to get wrong. The NetCDF
+  file is read back by an independent parser written from the format
+  specification (`crates/ta-tests/reference/check_netcdf.py`), which the test
+  runs when Python is available.
+* **Not ported:** reading Glotaran results back. `spec.md` §16.6 records this as
+  a decision: the application's own fitted curves and arbitrary curves can be
+  drawn in any figure (`SeriesSource::Fit`, `SeriesSource::Curve`), so a
+  result-side parser would be a second result format for a question already
+  answered here.

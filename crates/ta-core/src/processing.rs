@@ -212,6 +212,64 @@ impl ProcessingOp {
         }
     }
 
+    /// What the operation did, in words, with the parameters that make it
+    /// reproducible: "Crop" alone does not say what was kept.
+    pub fn describe(&self) -> String {
+        match self {
+            ProcessingOp::BackgroundPreZero(background) => match background.range {
+                PreZeroRange::FirstPoints { count } => format!("first {count} delay points"),
+                PreZeroRange::Interval { start, end } => format!("{start:.3} to {end:.3} ps"),
+            },
+            ProcessingOp::BackgroundReference(reference) => format!(
+                "reference dataset, factor {:.3}{}",
+                reference.factor,
+                if reference.normalize {
+                    ", normalised"
+                } else {
+                    ""
+                }
+            ),
+            ProcessingOp::TimeZero(correction) => format!(
+                "{} control point(s), {:?}, {:?}",
+                correction.curve.points.len(),
+                correction.interpolation,
+                correction.boundary
+            ),
+            ProcessingOp::Crop(crop) => {
+                let wavelength = crop
+                    .wavelength
+                    .map(|(low, high)| format!("{low:.1}–{high:.1} nm"))
+                    .unwrap_or_else(|| "all wavelengths".to_string());
+                let delay = crop
+                    .delay
+                    .map(|(low, high)| format!("{low:.3}–{high:.3} ps"))
+                    .unwrap_or_else(|| "all delays".to_string());
+                format!("{wavelength}, {delay}")
+            }
+            ProcessingOp::Average(average) => {
+                if average.mean {
+                    "mean of the inputs".to_string()
+                } else {
+                    "sum of the inputs".to_string()
+                }
+            }
+            ProcessingOp::BurnCorrect(burn) => format!(
+                "at {:.1} nm, reference delay {:.3} ps",
+                burn.wavelength, burn.reference_delay
+            ),
+            ProcessingOp::Stitch(stitch) => format!(
+                "crossover {:.1} nm, {:?}{}",
+                stitch.crossover_nm,
+                stitch.blend,
+                if stitch.match_overlap {
+                    ", overlap matched"
+                } else {
+                    ""
+                }
+            ),
+        }
+    }
+
     pub const fn version_kind(&self) -> VersionKind {
         match self {
             ProcessingOp::BackgroundPreZero(_) | ProcessingOp::BackgroundReference(_) => {

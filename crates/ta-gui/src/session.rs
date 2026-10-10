@@ -821,7 +821,7 @@ impl Session {
         let operation = version
             .op
             .as_ref()
-            .map(|op| format!("{} — {}", op.summary(), describe_op(op)))
+            .map(|op| format!("{} — {}", op.summary(), op.describe()))
             .unwrap_or_else(|| "the imported matrix".to_string());
         let ((w_low, w_high), (t_low, t_high)) = match dataset.axes(version_id) {
             Ok((wavelength, delay)) => (wavelength.range(), delay.range()),
@@ -989,61 +989,6 @@ fn strongest_wavelength(dataset: &TaDataset, version: VersionId) -> Option<f64> 
 }
 
 /// One line of an operation's parameters, for the caption and the inspector.
-pub fn describe_op(op: &ta_core::ProcessingOp) -> String {
-    use ta_core::ProcessingOp as Op;
-    match op {
-        Op::BackgroundPreZero(background) => match background.range {
-            ta_core::PreZeroRange::FirstPoints { count } => format!("first {count} delay points"),
-            ta_core::PreZeroRange::Interval { start, end } => {
-                format!("{start:.3} to {end:.3} ps")
-            }
-        },
-        Op::BackgroundReference(reference) => format!(
-            "reference dataset, factor {:.3}{}",
-            reference.factor,
-            if reference.normalize { ", normalised" } else { "" }
-        ),
-        Op::TimeZero(correction) => format!(
-            "{} control point(s), {:?}, {:?}",
-            correction.curve.points.len(),
-            correction.interpolation,
-            correction.boundary
-        ),
-        Op::Crop(crop) => {
-            let wavelength = crop
-                .wavelength
-                .map(|(low, high)| format!("{low:.1}–{high:.1} nm"))
-                .unwrap_or_else(|| "all wavelengths".to_string());
-            let delay = crop
-                .delay
-                .map(|(low, high)| format!("{low:.3}–{high:.3} ps"))
-                .unwrap_or_else(|| "all delays".to_string());
-            format!("{wavelength}, {delay}")
-        }
-        Op::Average(average) => {
-            if average.mean {
-                "mean of the inputs".to_string()
-            } else {
-                "sum of the inputs".to_string()
-            }
-        }
-        Op::BurnCorrect(burn) => format!(
-            "at {:.1} nm, reference delay {:.3} ps",
-            burn.wavelength, burn.reference_delay
-        ),
-        Op::Stitch(stitch) => format!(
-            "crossover {:.1} nm, {:?}{}",
-            stitch.crossover_nm,
-            stitch.blend,
-            if stitch.match_overlap {
-                ", overlap matched"
-            } else {
-                ""
-            }
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

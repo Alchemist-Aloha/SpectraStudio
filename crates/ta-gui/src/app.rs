@@ -970,7 +970,21 @@ impl Workspace {
                                 false,
                                 cx,
                                 move |workspace, _, _| workspace.export_plate_data(plate_id),
-                            )),
+                            ))
+                            // §16.5: preparing Glotaran input is on the plate
+                            // itself, not behind a workspace switch.
+                            .child(if plate_id == PlateId::Contour {
+                                widgets::action_id(
+                                    "glotaran",
+                                    ElementId::Name("glotaran-export".into()),
+                                    false,
+                                    cx,
+                                    |workspace, _, _| workspace.export_glotaran(),
+                                )
+                                .into_any_element()
+                            } else {
+                                div().into_any_element()
+                            }),
                     )
                     .h(px(CAPTION_HEIGHT)),
             )

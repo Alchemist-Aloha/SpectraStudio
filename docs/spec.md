@@ -7,7 +7,8 @@
 **Scientific backend:** Rust  
 **Reference implementation:** https://github.com/Alchemist-Aloha/TA_Analyzer  
 **Target:** Linux-first, with macOS and Windows support  
-**Status:** Implementation specification, v1.0
+**Status:** Implementation specification, v1.1 — Glotaran support is input
+generation only (§16); reading Glotaran results is out of scope (§16.6).
 
 ---
 
@@ -26,8 +27,7 @@ The principal workflows are:
 5. Fit kinetic traces using multiexponential models.
 6. Average experiments, compare datasets, and stitch visible/NIR data.
 7. Prepare input for Glotaran and pyglotaran.
-8. Inspect existing Glotaran results.
-9. Generate publication-quality graphics and numerical exports.
+8. Generate publication-quality graphics and numerical exports.
 
 The application is intended for interactive analysis of existing measurements, not real-time instrument acquisition.
 
@@ -74,9 +74,8 @@ The Python repository is the behavioral reference, but not necessarily the defin
 | `compare_traces` | `ta-core` + GUI | Multi-dataset trace comparisons |
 | `merge_glotaran` | `ta-processing` + `ta-io` | VIS/NIR dataset merging |
 | `glotaran`, `pyglotaran` | `ta-glotaran` | Legacy and modern data export |
-| `load_glotaran`, `batch_load_glotaran` | `ta-glotaran` | Glotaran dataset import |
-| `glotaran_output` | `ta-glotaran` | DAS and fitted-trace visualization |
-| `plot_glotaran_output_kinetics` | `ta-glotaran` | Kinetic-fit comparisons |
+| `load_glotaran`, `batch_load_glotaran` | — | Deliberately not ported; see §16.6 |
+| `glotaran_output`, `plot_glotaran_output_kinetics` | — | Deliberately not ported; see §16.6 |
 | `new_split_axes`, `plot_split_axes` | `ta-plot` | Combined linear/logarithmic time plotting |
 | `load_streak_camera_data` | `ta-io` | Streak-camera format handling |
 | `gaussian`, `fit_and_plot_gaussian` | `ta-fitting` | Gaussian fitting |
@@ -939,15 +938,22 @@ Each comparison plot must support the publication editor and numerical data expo
 
 ## 16. Glotaran integration
 
-### 16.1 Initial scope
+### 16.1 Scope
 
-The initial release must support Glotaran data preparation, input generation, and visualization of existing output.
+The application prepares and writes Glotaran input. It does not read Glotaran
+results, and it does not perform global analysis.
 
-The application will not perform full global-analysis optimization in this phase.
+Glotaran is a *destination*: a matrix is corrected here, exported in a format
+Glotaran reads, and fitted there. Reading its output back would mean maintaining
+a second result format, a second parameter vocabulary and a second set of
+uncertainty conventions for a question the application already answers with its
+own kinetic fitting (§12). Anything a result file could show is therefore either
+visible here already, or exported as numbers (§18) and inspected where the
+analysis was run.
 
 ### 16.2 Legacy Glotaran export
 
-Support the existing Time Explicit ASCII format.
+Support the existing time-explicit ASCII format.
 
 Export:
 
@@ -955,50 +961,69 @@ Export:
 - Time points.
 - Wavelength points.
 - Matrix values in the required orientation.
-- Appropriate headers and separators.
+- The header lines, the separator and the numeric formatting the format
+  expects.
 
-Users can select which processed matrix version to export.
+The export offers the processed matrix version currently on the bench, and names
+in the file which version it wrote.
 
-Validate the exported file by re-importing it.
+Validation is by re-import: the file the exporter writes must be readable by
+this application's own importer, yielding the same matrix and the same axes it
+was written from.
 
 ### 16.3 pyglotaran export
 
 Support the modern time/spectral dataset convention used by pyglotaran.
 
-The internal representation must map clearly to:
+The internal representation maps to:
 
 - `time`
 - `spectral`
 - `data`
 
-Support a compatible serialized dataset format, with NetCDF as a candidate. Verify interoperability with the targeted pyglotaran version.
+where `data` is the matrix with time along its first axis, which is the
+transpose of the internal wavelength-major storage.
 
-### 16.4 Glotaran result import
+Support a compatible serialized dataset format, with NetCDF as a candidate, and
+verify interoperability with the targeted pyglotaran version before the release
+is called finished.
 
-Port the existing support for:
+### 16.4 Version selection
 
-- Decay-associated spectra.
-- Kinetic parameter summaries.
-- Time constants and uncertainties.
-- IRF parameters.
-- Fitted traces.
-- Component-associated traces.
+Either export writes the version that is on the bench, and the exported file
+records it: the dataset name, the version's label, and the operation that
+produced it. A user comparing two exports can tell which was which without
+opening the project.
 
-Support loading complete result groups and batch loading from a folder.
+### 16.5 Export paths
 
-### 16.5 Glotaran visualization
+Both formats are written beside the project, or beside the imported file, and
+both are available from the contour plate's own actions, so preparing input does
+not require opening another workspace.
 
-Provide interactive DAS and component-trace plots.
+### 16.6 Deliberately not ported
 
-Support measured versus reconstructed fitted kinetics, lifetime labels, threshold filtering, and split linear/log axes.
+The reference implementation's result-side features are out of scope, and are
+listed here so that the omission is a decision rather than a gap:
 
-All Glotaran output plots must support the same publication figure editor and data export as other plot types.
+- `load_glotaran` and `batch_load_glotaran`: reading a Glotaran result file or a
+  folder of them.
+- `glotaran_output`: decay-associated spectra and reconstructed traces.
+- `plot_glotaran_output_kinetics`: measured-against-fitted kinetic overlays from
+  a Glotaran run.
 
-### 16.6 Future expansion
+The decay-associated spectra and the fitted curves of *this* application's own
+fits remain available: a fit's record holds its parameters, its prediction and
+its residuals (§12.7), and both a fit and an arbitrary curve can be drawn in any
+figure through `SeriesSource::Fit` and `SeriesSource::Curve` (§17.4).
 
-Reserve interfaces for future global-analysis models, parameter sets, fit jobs, and results.
+### 16.7 Future expansion
 
-Do not implement an incomplete global-analysis solver merely to satisfy the interface.
+Reserve interfaces for global-analysis models, parameter sets, fit jobs and
+results, so a future global analysis could write into the same structures.
+
+Do not implement an incomplete global-analysis solver merely to satisfy the
+interface.
 
 ---
 
@@ -1019,7 +1044,6 @@ This includes:
 - Fitting results.
 - Residual plots.
 - Time-zero correction diagnostics.
-- Glotaran DAS and fitted traces.
 - Stitching previews.
 
 ### 17.2 Figure editor UI
@@ -1274,7 +1298,9 @@ Gaussian fitting, multiexponential models, optimization, fit parameter structure
 
 **`ta-glotaran`**
 
-Legacy export, pyglotaran-compatible export, result parsing, DAS and component-trace structures.
+Legacy and pyglotaran-compatible input generation: the dataset view that both
+writers consume, the time-explicit ASCII writer and the NetCDF writer. Export
+only; see §16.1.
 
 **`ta-plot`**
 
@@ -1363,7 +1389,6 @@ Generate reference outputs from the Python implementation for:
 - Fitting.
 - Experiment averaging.
 - Glotaran export.
-- Existing Glotaran result parsing.
 
 Compare Rust outputs against Python with operation-appropriate tolerances.
 
@@ -1469,7 +1494,6 @@ Include keyboard and mouse-driven interaction tests.
 - Per-trace and per-spectrum styles.
 - Normalization and alignment options.
 - Split-axis plotting.
-- Glotaran result visualizations.
 
 **Exit condition:** Multiple datasets can be compared and plotted without changing or duplicating the underlying data.
 
@@ -1484,17 +1508,18 @@ Include keyboard and mouse-driven interaction tests.
 
 **Exit condition:** Every plot can be converted into a publication-quality figure and exported with its underlying numerical data.
 
-### Phase 7 — Glotaran and remaining parity
+### Phase 7 — Glotaran input and remaining parity
 
 - Legacy and pyglotaran-compatible export.
-- Glotaran data and result import.
-- Batch result loading.
-- DAS and fitted kinetics visualization.
 - Streak-camera data import.
 - Remaining Gaussian and helper functionality.
-- Complete feature-parity audit.
+- Complete feature-parity audit that names every Python entry point and where
+  it now lives, including the result-side features that are deliberately not
+  ported (§16.6).
 
-**Exit condition:** All supported workflows in the existing Python implementation are available without invoking Python.
+**Exit condition:** Every workflow the application claims — import, processing,
+extraction, fitting, comparison, stitching, figure production and Glotaran input
+generation — is available without invoking Python.
 
 ### Phase 8 — Polish and release
 

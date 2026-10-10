@@ -188,6 +188,85 @@ def time_zero_reference() -> dict:
     }
 
 
+def glotaran_reference() -> dict:
+    """The legacy time-explicit ASCII, exactly as the reference writes it.
+
+    `glotaran()` builds the table the Java Glotaran reads: a header naming the
+    file and the number of time points, a first row of times, and one row per
+    wavelength whose first column is the wavelength. Everything is written with
+    `fmt="%s"`, so the numbers are Python's own `str()` of the float.
+    """
+    matrix = np.loadtxt(DATA / "NIR800_tcorr")
+    tatime = np.loadtxt(DATA / "NIR800_tatime")
+    tawavelength = np.loadtxt(DATA / "NIR800_tawavelength")
+
+    output_matrix = np.append(tatime.reshape(1, -1), matrix, axis=0)
+    output_matrix = np.append(
+        np.append("", tawavelength).reshape(1, -1).T, output_matrix, axis=1
+    )
+    header = "NIR800_tcorr\n\nTime explicit\nintervalnr " + str(len(tatime))
+    lines: list[str] = []
+    for line in header.split("\n"):
+        lines.append(line)
+    for row in output_matrix:
+        lines.append("\t".join(str(value) for value in row))
+    return {
+        "header_lines": header.split("\n"),
+        "separator": "\t",
+        "format": "str() of the float, as np.savetxt fmt=%s writes it",
+        "line_count": len(lines),
+        "columns": int(output_matrix.shape[1]),
+        "first_rows": ["\t".join(str(v) for v in row) for row in output_matrix[:3]],
+        "last_row": "\t".join(str(v) for v in output_matrix[-1]),
+        "row_400": "\t".join(str(v) for v in output_matrix[1]),
+        "time_row_first": str(tatime[0]),
+        "time_row_last": str(tatime[-1]),
+    }
+
+
+def float_format_reference() -> dict:
+    """How Python writes a float, which is what the ASCII export has to match.
+
+    `np.savetxt(fmt="%s")` hands every value to `str()`, so the file's numbers
+    are Python's own shortest round-tripping representation. These are the values
+    whose form is easy to get wrong: the ends of the decimal notation, the
+    exponent's sign and width, and negative zero.
+    """
+    values = [
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        0.1,
+        -0.00011,
+        0.00028,
+        -0.00008,
+        1e-4,
+        1e-5,
+        1.5e-5,
+        -8e-05,
+        0.000123456,
+        400.38315,
+        799.61685,
+        1179.2252,
+        1e15,
+        1e16,
+        1e17,
+        1.23e16,
+        -1.2345678901234567,
+        123456.789,
+        0.5,
+        2.5,
+        100.0,
+        1e-300,
+        1.7976931348623157e308,
+        5e-324,
+        3.141592653589793,
+        6.02214076e23,
+    ]
+    return {str(value): repr(value) for value in values}
+
+
 def main() -> None:
     sheet_path = DATA / "NIR800"
     matrix_path = DATA / "NIR800_tcorr"
@@ -317,6 +396,8 @@ def main() -> None:
         "cropped_trace_index": corr_trace_index,
         "model": model_reference(),
         "time_zero": time_zero_reference(),
+        "glotaran": glotaran_reference(),
+        "float_format": float_format_reference(),
     }
 
     out = Path(__file__).resolve().parent / "nir800_reference.json"

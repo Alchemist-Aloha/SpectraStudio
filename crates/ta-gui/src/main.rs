@@ -116,6 +116,7 @@ fn main() {
                         .unwrap_or(app::ExportFormat::Svg);
                     workspace.export_studio(format);
                     workspace.export_studio_data(true);
+                    workspace.export_glotaran();
                     workspace.layout = app::Layout::Studio;
                 }
                 if fit {
