@@ -185,7 +185,14 @@ fn paint_command(
                     px(size.1 as f32 * transform.scale),
                 ),
             );
-            let _ = window.paint_image(bounds, bounds, Corners::default(), image, 0, false);
+            // A bitmap that fails to paint is a silently empty plot, so the
+            // result is reported rather than dropped.
+            if let Err(error) = window.paint_image(bounds, bounds, Corners::default(), image, 0, false)
+            {
+                if std::env::var_os("SPECTRA_TRACE").is_some() {
+                    eprintln!("paint_image failed: {error}");
+                }
+            }
         }
     }
 }

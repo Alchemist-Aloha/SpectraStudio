@@ -18,7 +18,9 @@ use gpui_kit::{
 use std::path::PathBuf;
 use std::rc::Rc;
 use ta_core::{Rgba, SampleMode};
-use ta_plot_gpui::{HeatmapCache, PanelScene, Plate, PlotGesture, PlotState};
+use ta_plot_gpui::{
+    HeatmapCache, HeatmapSource, PanelScene, Plate, PlotGesture, PlotState, SharedHeatmapCache,
+};
 
 const INDEX_WIDTH: f32 = 208.0;
 const INSPECTOR_WIDTH: f32 = 316.0;
@@ -80,7 +82,11 @@ pub struct Workspace {
     pub session: Session,
     /// One interactive plate per panel of the figure block.
     plates: Vec<Plate>,
-    raster: HeatmapCache,
+    /// The colour-mapped contour image, shared with the plates because each
+    /// builds its own image during prepaint, at its own plot size.
+    raster: SharedHeatmapCache,
+    /// What the contour's image is made from, rebuilt when the matrix changes.
+    contour_source: Option<std::rc::Rc<HeatmapSource>>,
     /// Bumped whenever the project changed, so the scenes are rebuilt once.
     revision: u64,
     built: u64,
@@ -101,7 +107,8 @@ impl Workspace {
         let mut workspace = Self {
             session,
             plates: Vec::new(),
-            raster: HeatmapCache::new(),
+            raster: std::rc::Rc::new(std::cell::RefCell::new(HeatmapCache::new())),
+            contour_source: None,
             revision: 1,
             built: 0,
             caption_of: Default::default(),
@@ -153,6 +160,7 @@ impl Workspace {
         let spec = plates::contour_spec(&self.session);
         let views = plates::style();
         self.ensure_contour(&spec);
+        self.ensure_contour_source(&spec);
         for (index, plate_id) in PlateId::ALL.iter().enumerate() {
             // The contour reuses its cached isolines; the linked plates are
             // cheap enough to rebuild every time.
@@ -174,7 +182,7 @@ impl Workspace {
                 .map(|plate| plate.state.borrow().clone())
                 .unwrap_or_else(|| PlotState::new(x_range, y_range));
             let heatmap = if *plate_id == PlateId::Contour {
-                self.contour_image(&previous)
+                self.contour_source.clone()
             } else {
                 None
             };
@@ -197,7 +205,9 @@ impl Workspace {
                         plate.state.borrow_mut().set_home(x_range, y_range);
                     }
                 }
-                None => self.plates.push(Plate::new(scene, previous)),
+                None => self
+                    .plates
+                    .push(Plate::new(scene, previous, self.raster.clone())),
             }
             self.caption_of[index] = self.session.caption(*plate_id);
         }
@@ -205,47 +215,36 @@ impl Workspace {
         self.built = self.revision;
     }
 
-    /// The colour-mapped matrix for the contour's current window.
+    /// Rebuilds what the contour's image is made from.
     ///
-    /// The request borrows the session, so it is built, keyed and consumed
-    /// inside one block; the cache is written after the borrow ends.
-    fn contour_image(&mut self, state: &PlotState) -> Option<std::sync::Arc<ta_plot_gpui::HeatmapData>> {
-        let background = Rgba::rgb(255, 255, 255);
-        let spec = plates::contour_spec(&self.session);
-        let (key, fresh) = {
-            let dataset = self.session.dataset()?;
-            let version = self.session.version_id()?;
-            let (wavelength, delay) = dataset.axes(version).ok()?;
-            let matrix = dataset.matrix(version).ok()?;
-            let (width, height) = raster_size(wavelength, delay, state.x_range, state.y_range);
-            let grid = ta_plot::ContourGrid::from_matrix(wavelength, delay, matrix).ok()?;
-            let request = ta_plot::colormap::RasterRequest {
-                grid,
-                source: Some((dataset.id, version)),
-                x_range: state.x_range,
-                y_range: state.y_range,
-                width,
-                height,
-                limits: spec.limits.clone(),
-                colormap: spec.colormap.clone(),
-                levels: Vec::new(),
-                level_count: spec.level_count,
-                sampling: ta_plot::RasterSampling::Nearest,
-            };
-            let key = ta_plot_gpui::request_key(&request);
-            if self.raster.matches(&key) {
-                (key, None)
-            } else {
-                (
-                    key,
-                    Some(ta_plot_gpui::build_heatmap(&request, background)),
-                )
-            }
-        };
-        if let Some(data) = fresh {
-            self.raster.store(key, data);
+    /// The image itself is built later, by the plate, at the plot rectangle's
+    /// size — an image built here would be blitted at its own pixel size and
+    /// cover only part of the plate.
+    fn ensure_contour_source(&mut self, spec: &ta_core::ContourSpec) {
+        let key = self.contour_key();
+        if self.contour_source.is_some() && self.contour_key == key {
+            return;
         }
-        self.raster.current()
+        self.contour_source = None;
+        let Some(dataset) = self.session.dataset() else {
+            return;
+        };
+        let Some(version) = self.session.version_id() else {
+            return;
+        };
+        let (Ok((wavelength, delay)), Ok(matrix)) = (dataset.axes(version), dataset.matrix(version))
+        else {
+            return;
+        };
+        self.contour_source = Some(std::rc::Rc::new(HeatmapSource {
+            wavelength: wavelength.clone(),
+            delay: delay.clone(),
+            matrix: std::sync::Arc::new(matrix.clone()),
+            spec: spec.clone(),
+            sampling: ta_plot::RasterSampling::Nearest,
+            background: Rgba::rgb(255, 255, 255),
+            source: Some((dataset.id, version)),
+        }));
     }
 
     // -- actions -----------------------------------------------------------
@@ -371,7 +370,37 @@ impl Workspace {
             .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
             .unwrap_or_else(std::env::temp_dir);
         let path = directory.join(format!("spectra-studio-{}.svg", plate.letter()));
-        let panels = vec![ta_plot::export::ExportPanel::new(0, content.series)];
+        // The image is made at the size the exported figure will use, because
+        // Plotters blits a bitmap one pixel per pixel.
+        let series = content.series.clone();
+        let mut panels = vec![ta_plot::export::ExportPanel::new(0, series.clone())];
+        if let Some(source) = &self.contour_source {
+            let (figure_width, figure_height) = ta_plot::export::figure_points(&figure);
+            let x_scale = ta_plot::Scale::new(figure.panels[0].x.scale).unwrap_or_default();
+            let y_scale = ta_plot::Scale::new(figure.panels[0].y.scale).unwrap_or_default();
+            let layout = ta_plot::PanelLayout::compute(
+                &figure.panels[0],
+                &figure.style,
+                x_scale,
+                y_scale,
+                figure.panels[0].x.range.unwrap_or((0.0, 1.0)),
+                figure.panels[0].y.range.unwrap_or((0.0, 1.0)),
+                (figure_width, figure_height),
+            );
+            let (plot_width, plot_height) = layout.plot_size();
+            if let Some(layer) = source.layer(
+                &mut self.raster.borrow_mut(),
+                (
+                    plot_width.round().max(2.0) as u32,
+                    plot_height.round().max(2.0) as u32,
+                ),
+                state_window(&self.plates, 0).0,
+                state_window(&self.plates, 0).1,
+            ) {
+                panels = vec![ta_plot::export::ExportPanel::new(0, series)
+                    .with_heatmap((*layer).clone())];
+            }
+        }
         match ta_plot::export::export_svg(&figure, panels, &path) {
             Ok(()) => self
                 .session
@@ -982,32 +1011,23 @@ impl Render for Workspace {
     }
 }
 
+/// A plate's current window.
+fn state_window(plates: &[Plate], index: usize) -> ((f64, f64), (f64, f64)) {
+    match plates.get(index) {
+        Some(plate) => {
+            let state = plate.state.borrow();
+            (state.x_range, state.y_range)
+        }
+        None => ((0.0, 1.0), (0.0, 1.0)),
+    }
+}
+
 /// The default window of a plate: the whole range of the panel, or a unit box
 /// when nothing is loaded.
 fn default_ranges(panel: &ta_core::PanelModel) -> ((f64, f64), (f64, f64)) {
     (
         panel.x.range.unwrap_or((0.0, 1.0)),
         panel.y.range.unwrap_or((0.0, 1.0)),
-    )
-}
-
-/// The number of samples in the visible window, which is the most useful
-/// resolution for the colour-mapped image.
-fn raster_size(
-    wavelength: &ta_core::Axis,
-    delay: &ta_core::Axis,
-    x_range: (f64, f64),
-    y_range: (f64, f64),
-) -> (usize, usize) {
-    let count = |axis: &ta_core::Axis, range: (f64, f64)| {
-        axis.values()
-            .iter()
-            .filter(|value| **value >= range.0 && **value <= range.1)
-            .count()
-    };
-    (
-        count(wavelength, x_range).clamp(2, 1024),
-        count(delay, y_range).clamp(2, 512),
     )
 }
 
@@ -1146,7 +1166,24 @@ mod tests {
             workspace.plates[0].scene.heatmap.is_some(),
             "the colour-mapped matrix should be there"
         );
-        assert!(workspace.raster.byte_len() > 0);
+    }
+
+    #[test]
+    fn the_contour_image_covers_the_window_the_plate_is_showing() {
+        // The defect this catches: the image was built from the window the
+        // plate had before the dataset arrived, so a two-pixel-wide smear was
+        // stretched across the plot.
+        let workspace = workspace_with_dataset();
+        let source = workspace.plates[0]
+            .scene
+            .heatmap
+            .as_ref()
+            .expect("the contour has a matrix to colour-map");
+        assert_eq!(source.matrix.dim(), (4, 4));
+        assert_eq!(source.wavelength.len(), 4);
+        assert_eq!(source.delay.len(), 4);
+        // And no other plate carries one.
+        assert!(workspace.plates[1].scene.heatmap.is_none());
     }
 
     #[test]

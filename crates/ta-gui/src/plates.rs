@@ -55,12 +55,17 @@ pub fn warm() -> Rgba {
 }
 
 /// The colour limits of the open matrix, symmetric about zero.
+///
+/// The scale is trimmed to the 99th percentile of the magnitude rather than the
+/// extremes: one hot pixel otherwise owns the whole scale and the field reads as
+/// washed out. The limits are shown in the caption and the inspector, so nothing
+/// is hidden by the trim.
 pub fn colour_limits(session: &Session) -> ColorLimits {
     let mut limits = ColorLimits {
         min: -1.0,
         max: 1.0,
         symmetric_about_zero: true,
-        auto: ta_core::AutoRange::Full,
+        auto: ta_core::AutoRange::Percentile(99.0),
     };
     if let Some(dataset) = session.dataset() {
         if let Some(version) = session.version_id() {

@@ -10,7 +10,7 @@ mod cache;
 mod plot;
 mod replay;
 
-pub use cache::{build_heatmap, request_key, HeatmapCache, HeatmapData};
+pub use cache::{request_key, HeatmapCache, HeatmapSource, SharedHeatmapCache};
 pub use plot::{
     DragState, Interaction, PanelScene, Plate, PlotCursor, PlotElement, PlotFrame, PlotGesture,
     PlotState,

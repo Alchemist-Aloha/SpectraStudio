@@ -1,56 +1,68 @@
-//! The raster cache behind the contour plate.
+//! The colour-mapped matrix behind the contour plate, and its cache.
 //!
-//! A frame that changed nothing rebuilds nothing: the colour-mapped image is
-//! keyed on every input that affects it, and the key is computed before any
-//! pixels are made.
+//! The image is asked for *after* the plate's layout is known, so it is built at
+//! exactly the size of the plot rectangle. Building it earlier — at the sample
+//! count of the visible window — paints a small image at its own pixel size,
+//! which Plotters cannot scale, and the field then covers only part of the
+//! plate.
 
-use gpui_kit::RenderImage;
+use ndarray::Array2;
+use std::rc::Rc;
 use std::sync::Arc;
-use ta_core::Rgba as InkColor;
+use ta_core::{Axis, ContourSpec, DatasetId, Rgba as InkColor, VersionId};
 use ta_plot::colormap::{band_levels, rasterise, RasterKey, RasterRequest};
 use ta_plot::render::HeatmapLayer;
+use ta_plot::{ContourGrid, RasterSampling};
 
-/// The image in the two forms the two backends need.
-pub struct HeatmapData {
-    /// RGB, for the recorder that builds an exported figure.
-    pub layer: HeatmapLayer,
-    /// BGRA, for the screen.
-    pub image: Arc<RenderImage>,
-    /// The image's size, so a caller can place it without asking the atlas.
-    pub size: (u32, u32),
+/// Everything needed to make one plate's image.
+pub struct HeatmapSource {
+    pub wavelength: Axis,
+    pub delay: Axis,
+    /// Shared rather than borrowed, so the plate can build its image during
+    /// prepaint, when the dataset is only reachable through the session.
+    pub matrix: Arc<Array2<f64>>,
+    pub spec: ContourSpec,
+    pub sampling: RasterSampling,
+    pub background: InkColor,
+    pub source: Option<(DatasetId, VersionId)>,
 }
 
-impl HeatmapData {
-    /// Composites an RGBA raster over a background colour and swizzles it for
-    /// GPUI, which takes BGRA.
-    pub fn from_raster(pixels: &[u8], width: usize, height: usize, background: InkColor) -> Self {
-        let layer = HeatmapLayer::from_rgba_over(pixels, width, height, background);
-        let mut bgra = Vec::with_capacity(width * height * 4);
-        for chunk in pixels.chunks_exact(4) {
-            bgra.push(chunk[2]);
-            bgra.push(chunk[1]);
-            bgra.push(chunk[0]);
-            bgra.push(chunk[3]);
-        }
-        let buffer = image::ImageBuffer::from_raw(width as u32, height as u32, bgra)
-            .expect("the buffer is exactly the raster's size");
-        let image = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
-        Self {
-            layer,
-            image,
-            size: (width as u32, height as u32),
-        }
-    }
-
-    pub fn byte_len(&self) -> usize {
-        self.layer.rgb.len() + self.size.0 as usize * self.size.1 as usize * 4
+impl HeatmapSource {
+    /// The image for one window, at the plot rectangle's own size.
+    pub fn layer(
+        &self,
+        cache: &mut HeatmapCache,
+        pixels: (u32, u32),
+        x_range: (f64, f64),
+        y_range: (f64, f64),
+    ) -> Option<Arc<HeatmapLayer>> {
+        let Ok(grid) = ContourGrid::from_matrix(&self.wavelength, &self.delay, &self.matrix) else {
+            return None;
+        };
+        // A plate can be small, and a zero-sized image is not an image.
+        let width = (pixels.0.max(2).min(4096)) as usize;
+        let height = (pixels.1.max(2).min(4096)) as usize;
+        let request = RasterRequest {
+            grid,
+            source: self.source,
+            x_range,
+            y_range,
+            width,
+            height,
+            limits: self.spec.limits.clone(),
+            colormap: self.spec.colormap.clone(),
+            levels: self.spec.levels.clone(),
+            level_count: self.spec.level_count,
+            sampling: self.sampling,
+        };
+        Some(cache.layer(&request, self.background))
     }
 }
 
 /// The key a request would be cached under.
 pub fn request_key(request: &RasterRequest<'_>) -> RasterKey {
     let boundaries = match request.sampling {
-        ta_plot::RasterSampling::Levels => {
+        RasterSampling::Levels => {
             band_levels(&request.limits, &request.levels, request.level_count)
         }
         _ => Vec::new(),
@@ -58,26 +70,14 @@ pub fn request_key(request: &RasterRequest<'_>) -> RasterKey {
     RasterKey::of(request, request.sampling, &boundaries)
 }
 
-/// Builds the image for a request, for callers that manage the cache key
-/// themselves.
-pub fn build_heatmap(
-    request: &RasterRequest<'_>,
-    background: InkColor,
-) -> Arc<HeatmapData> {
-    let raster = rasterise(request);
-    Arc::new(HeatmapData::from_raster(
-        &raster.pixels,
-        raster.width,
-        raster.height,
-        background,
-    ))
-}
-
 /// Holds the last image and the key that produced it.
+///
+/// Shared through an `Rc` because the plate builds its image while painting,
+/// when the workspace that owns the cache is only borrowed immutably.
 #[derive(Default)]
 pub struct HeatmapCache {
     key: Option<RasterKey>,
-    data: Option<Arc<HeatmapData>>,
+    layer: Option<Arc<HeatmapLayer>>,
 }
 
 impl HeatmapCache {
@@ -85,118 +85,137 @@ impl HeatmapCache {
         Self::default()
     }
 
-    /// Whether the cache already holds this exact image.
     pub fn matches(&self, key: &RasterKey) -> bool {
-        self.key.as_ref() == Some(key) && self.data.is_some()
+        self.key.as_ref() == Some(key) && self.layer.is_some()
     }
 
-    /// Stores an image under its key.
-    pub fn store(&mut self, key: RasterKey, data: Arc<HeatmapData>) {
-        self.key = Some(key);
-        self.data = Some(data);
+    pub fn current(&self) -> Option<Arc<HeatmapLayer>> {
+        self.layer.clone()
     }
 
-    /// The image currently held, if any.
-    pub fn current(&self) -> Option<Arc<HeatmapData>> {
-        self.data.clone()
+    /// What the held image was built from.
+    pub fn key(&self) -> Option<&RasterKey> {
+        self.key.as_ref()
     }
 
     /// The image for this request, rebuilt only when something visible changed.
-    pub fn get(&mut self, request: &RasterRequest<'_>, background: InkColor) -> Arc<HeatmapData> {
-        let boundaries = match request.sampling {
-            ta_plot::RasterSampling::Levels => {
-                band_levels(&request.limits, &request.levels, request.level_count)
-            }
-            _ => Vec::new(),
-        };
-        let key = RasterKey::of(request, request.sampling, &boundaries);
+    pub fn layer(&mut self, request: &RasterRequest<'_>, background: InkColor) -> Arc<HeatmapLayer> {
+        let key = request_key(request);
         if self.key.as_ref() == Some(&key) {
-            if let Some(data) = &self.data {
-                return data.clone();
+            if let Some(layer) = &self.layer {
+                return layer.clone();
             }
         }
         let raster = rasterise(request);
-        let data = Arc::new(HeatmapData::from_raster(
+        let layer = Arc::new(HeatmapLayer::from_rgba_over(
             &raster.pixels,
             raster.width,
             raster.height,
             background,
         ));
         self.key = Some(key);
-        self.data = Some(data.clone());
-        data
+        self.layer = Some(layer.clone());
+        layer
     }
 
     pub fn is_empty(&self) -> bool {
-        self.data.is_none()
+        self.layer.is_none()
     }
 
     /// Drops the image, for a dataset that was closed.
     pub fn forget(&mut self) {
         self.key = None;
-        self.data = None;
+        self.layer = None;
     }
 
     pub fn byte_len(&self) -> usize {
-        self.data.as_ref().map(|data| data.byte_len()).unwrap_or(0)
+        self.layer
+            .as_ref()
+            .map(|layer| layer.rgb.len())
+            .unwrap_or(0)
     }
 }
+
+/// A cache shared by every plate.
+pub type SharedHeatmapCache = Rc<std::cell::RefCell<HeatmapCache>>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::Array2;
-    use ta_core::{AutoRange, Axis, AxisKind, AxisUnit, ColorLimits, Colormap};
-    use ta_plot::{ContourGrid, RasterSampling};
+    use ta_core::{AutoRange, AxisKind, AxisUnit, ColorLimits, Colormap};
 
-    fn axis(count: usize, step: f64) -> Axis {
-        Axis::new(
+    fn source() -> HeatmapSource {
+        let wavelength = Axis::new(
             AxisKind::Wavelength,
             AxisUnit::Nanometer,
             "w",
-            (0..count).map(|i| i as f64 * step).collect(),
+            (0..8).map(|i| 500.0 + i as f64).collect(),
         )
-        .unwrap()
+        .unwrap();
+        let delay = Axis::new(
+            AxisKind::Delay,
+            AxisUnit::Picosecond,
+            "t",
+            (0..4).map(|i| i as f64).collect(),
+        )
+        .unwrap();
+        HeatmapSource {
+            wavelength,
+            delay,
+            matrix: Arc::new(Array2::from_elem((8, 4), 0.5)),
+            spec: ContourSpec {
+                limits: ColorLimits {
+                    min: 0.0,
+                    max: 1.0,
+                    symmetric_about_zero: false,
+                    auto: AutoRange::Manual,
+                },
+                colormap: Colormap::preset("grey").unwrap(),
+                ..ContourSpec::default()
+            },
+            sampling: RasterSampling::Nearest,
+            background: InkColor::rgb(255, 255, 255),
+            source: None,
+        }
+    }
+
+    #[test]
+    fn the_image_is_exactly_the_size_the_plate_asked_for() {
+        // This is the defect: an image at the sample count is painted at its own
+        // pixel size, so the field covers only part of the plate.
+        let mut cache = HeatmapCache::new();
+        let layer = source()
+            .layer(&mut cache, (640, 480), (500.0, 507.0), (0.0, 3.0))
+            .expect("an image");
+        assert_eq!((layer.width, layer.height), (640, 480));
+    }
+
+    #[test]
+    fn a_tiny_plate_still_gets_a_drawable_image() {
+        let mut cache = HeatmapCache::new();
+        let layer = source()
+            .layer(&mut cache, (0, 1), (500.0, 507.0), (0.0, 3.0))
+            .expect("an image");
+        assert!(layer.width >= 2 && layer.height >= 2);
     }
 
     #[test]
     fn the_same_request_reuses_the_same_image() {
-        let x = axis(4, 1.0);
-        let y = axis(4, 1.0);
-        let values = Array2::from_elem((4, 4), 0.5);
-        let grid = ContourGrid::from_matrix(&x, &y, &values).unwrap();
-        let request = RasterRequest {
-            grid,
-            source: None,
-            x_range: (0.0, 3.0),
-            y_range: (0.0, 3.0),
-            width: 8,
-            height: 8,
-            limits: ColorLimits {
-                min: 0.0,
-                max: 1.0,
-                symmetric_about_zero: false,
-                auto: AutoRange::Manual,
-            },
-            colormap: Colormap::preset("grey").unwrap(),
-            levels: Vec::new(),
-            level_count: 4,
-            sampling: RasterSampling::Nearest,
-        };
-
         let mut cache = HeatmapCache::new();
         assert!(cache.is_empty());
-        let first = cache.get(&request, InkColor::rgb(255, 255, 255));
-        let second = cache.get(&request, InkColor::rgb(255, 255, 255));
+        let first = source()
+            .layer(&mut cache, (64, 32), (500.0, 507.0), (0.0, 3.0))
+            .expect("an image");
+        let second = source()
+            .layer(&mut cache, (64, 32), (500.0, 507.0), (0.0, 3.0))
+            .expect("an image");
         assert!(Arc::ptr_eq(&first, &second), "the cache rebuilt an identical image");
         assert!(cache.byte_len() > 0);
 
-        // A moved window is a different image.
-        let moved = RasterRequest {
-            x_range: (0.0, 2.0),
-            ..request
-        };
-        let third = cache.get(&moved, InkColor::rgb(255, 255, 255));
+        // A resized plate is a different image.
+        let third = source()
+            .layer(&mut cache, (128, 64), (500.0, 507.0), (0.0, 3.0))
+            .expect("an image");
         assert!(!Arc::ptr_eq(&first, &third));
         cache.forget();
         assert!(cache.is_empty());

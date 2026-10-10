@@ -6,7 +6,7 @@
 //! into changes. The pointer and the renderer read the *same* layout, so a
 //! coordinate the crosshair reports is the coordinate that was drawn.
 
-use crate::cache::HeatmapData;
+use crate::cache::{HeatmapSource, SharedHeatmapCache};
 use crate::replay::{paint_buffer, ReplayTransform};
 use gpui_kit::{
     fill, point, px, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
@@ -19,7 +19,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use ta_core::{PanelModel, PublicationStyle, Rgba as InkColor};
 use ta_plot::commands::CommandBuffer;
-use ta_plot::render::{PanelLayout, PlottedSeries};
+use ta_plot::render::{HeatmapLayer, PanelLayout, PlottedSeries};
 use ta_plot::{record_panel, PlotViewport, Scale};
 
 /// What the pointer did, handed to the owner so it can update its own state and
@@ -367,7 +367,9 @@ pub struct PanelScene {
     pub panel: PanelModel,
     pub style: PublicationStyle,
     pub series: Vec<PlottedSeries>,
-    pub heatmap: Option<Arc<HeatmapData>>,
+    /// The matrix to colour-map, if this plate shows one. The image itself is
+    /// built during prepaint, at the plot rectangle's size.
+    pub heatmap: Option<Rc<HeatmapSource>>,
     pub background: InkColor,
     /// Selection cursors, in the accent colour.
     pub cursors: Vec<PlotCursor>,
@@ -388,10 +390,12 @@ pub struct PlotFrame {
     pub size: (f64, f64),
     panel: PanelModel,
     series: Vec<PlottedSeries>,
-    heatmap: Option<usize>,
     x_range: (f64, f64),
     y_range: (f64, f64),
     show_grid: bool,
+    /// Which raster was drawn, when one was: the identity the export audit and
+    /// the tests ask about.
+    pub heatmap: Option<ta_plot::colormap::RasterKey>,
 }
 
 impl PlotFrame {
@@ -411,11 +415,6 @@ impl PlotFrame {
             && self.show_grid == show_grid
             && self.panel == scene.panel
             && self.series == scene.series
-            && self.heatmap
-                == scene
-                    .heatmap
-                    .as_ref()
-                    .map(|data| Arc::as_ptr(data) as usize)
     }
 
     /// The physical coordinate of a window position.
@@ -441,6 +440,7 @@ fn compute_frame(
     state: &PlotState,
     size: (f64, f64),
     show_grid: bool,
+    heatmap_cache: &SharedHeatmapCache,
 ) -> PlotFrame {
     let x_scale = Scale::new(scene.panel.x.scale).unwrap_or(Scale::Linear);
     let y_scale = Scale::new(scene.panel.y.scale).unwrap_or(Scale::Linear);
@@ -464,13 +464,35 @@ fn compute_frame(
     panel.y.grid = show_grid;
     panel.x.grid = show_grid;
 
+    // The image is built now, when the plot rectangle's size is known, and at
+    // exactly that size: Plotters blits a bitmap one pixel per pixel.
+    let (plot_width, plot_height) = layout.plot_size();
+    let layer: Option<Arc<HeatmapLayer>> = scene.heatmap.as_ref().and_then(|source| {
+        source.layer(
+            &mut heatmap_cache.borrow_mut(),
+            (
+                plot_width.round().max(2.0) as u32,
+                plot_height.round().max(2.0) as u32,
+            ),
+            state.x_range,
+            state.y_range,
+        )
+    });
+    // The key the cache built under, kept so the frame can say which image it
+    // drew without holding the pixels twice.
+    let heatmap_key = if layer.is_some() {
+        heatmap_cache.borrow().key().cloned()
+    } else {
+        None
+    };
+
     let buffer = record_panel(
         &panel,
         &scene.style,
         &layout,
         &viewport,
         &scene.series,
-        scene.heatmap.as_ref().map(|data| &data.layer),
+        layer.as_deref(),
         (width.round() as u32, height.round() as u32),
     );
 
@@ -482,10 +504,7 @@ fn compute_frame(
         size,
         panel: scene.panel.clone(),
         series: scene.series.clone(),
-        heatmap: scene
-            .heatmap
-            .as_ref()
-            .map(|data| Arc::as_ptr(data) as usize),
+        heatmap: heatmap_key,
         x_range: state.x_range,
         y_range: state.y_range,
         show_grid,
@@ -509,6 +528,7 @@ pub struct PlotElement {
     scene: Rc<PanelScene>,
     state: Rc<RefCell<PlotState>>,
     frame: Rc<RefCell<Option<PlotFrame>>>,
+    heatmap_cache: SharedHeatmapCache,
     hitbox: Rc<RefCell<Option<Hitbox>>>,
     on_gesture: Option<Rc<dyn Fn(PlotGesture, &mut Window, &mut App)>>,
 }
@@ -519,12 +539,14 @@ impl PlotElement {
         scene: Rc<PanelScene>,
         state: Rc<RefCell<PlotState>>,
         frame: Rc<RefCell<Option<PlotFrame>>>,
+        heatmap_cache: SharedHeatmapCache,
     ) -> Self {
         Self {
             id: id.into(),
             scene,
             state,
             frame,
+            heatmap_cache,
             hitbox: Rc::new(RefCell::new(None)),
             on_gesture: None,
         }
@@ -593,7 +615,13 @@ impl Element for PlotElement {
             }
         };
         if stale {
-            let computed = compute_frame(&self.scene, &self.state.borrow(), size, show_grid);
+            let computed = compute_frame(
+                &self.scene,
+                &self.state.borrow(),
+                size,
+                show_grid,
+                &self.heatmap_cache,
+            );
             *self.frame.borrow_mut() = Some(computed);
         }
         *self.hitbox.borrow_mut() = Some(window.insert_hitbox(bounds, HitboxBehavior::Normal));
@@ -1057,14 +1085,16 @@ pub struct Plate {
     pub scene: Rc<PanelScene>,
     pub state: Rc<RefCell<PlotState>>,
     pub frame: Rc<RefCell<Option<PlotFrame>>>,
+    pub heatmap_cache: SharedHeatmapCache,
 }
 
 impl Plate {
-    pub fn new(scene: PanelScene, state: PlotState) -> Self {
+    pub fn new(scene: PanelScene, state: PlotState, heatmap_cache: SharedHeatmapCache) -> Self {
         Self {
             scene: Rc::new(scene),
             state: Rc::new(RefCell::new(state)),
             frame: Rc::new(RefCell::new(None)),
+            heatmap_cache,
         }
     }
 
@@ -1079,7 +1109,13 @@ impl Plate {
     }
 
     pub fn element(&self, id: impl Into<ElementId>) -> PlotElement {
-        PlotElement::new(id, self.scene.clone(), self.state.clone(), self.frame.clone())
+        PlotElement::new(
+            id,
+            self.scene.clone(),
+            self.state.clone(),
+            self.frame.clone(),
+            self.heatmap_cache.clone(),
+        )
     }
 
     pub fn hover(&self) -> Option<(f64, f64)> {
@@ -1208,6 +1244,110 @@ mod tests {
         assert_eq!(forward, backward);
         assert!(forward.0 .0 < forward.1 .0);
         assert!(forward.0 .1 < forward.1 .1);
+    }
+
+    #[test]
+    fn the_frame_builds_its_image_at_the_plot_rectangles_size() {
+        // The defect this catches: an image built at the sample count was
+        // blitted at its own pixel size, so the colour field covered only part
+        // of the plate and the rest showed blank paper.
+        use crate::cache::{HeatmapCache, HeatmapSource};
+        use ndarray::Array2 as Grid;
+        use ta_core::{Axis, AxisKind, AxisUnit, AutoRange, ColorLimits, Colormap, ContourSpec};
+
+        let wavelength = Axis::new(
+            AxisKind::Wavelength,
+            AxisUnit::Nanometer,
+            "w",
+            (0..40).map(|i| 500.0 + i as f64).collect(),
+        )
+        .unwrap();
+        let delay = Axis::new(
+            AxisKind::Delay,
+            AxisUnit::Picosecond,
+            "t",
+            (0..20).map(|i| i as f64).collect(),
+        )
+        .unwrap();
+        let matrix = Grid::from_elem((40, 20), 0.2);
+
+        let mut panel = PanelModel::new("");
+        panel.x = ta_core::AxisModel {
+            label: "Wavelength".into(),
+            unit: Some("nm".into()),
+            range: Some((500.0, 539.0)),
+            ..ta_core::AxisModel::default()
+        };
+        panel.y = ta_core::AxisModel {
+            label: "Delay".into(),
+            unit: Some("ps".into()),
+            range: Some((0.0, 19.0)),
+            ..ta_core::AxisModel::default()
+        };
+        panel.contour = Some(ContourSpec {
+            limits: ColorLimits {
+                min: -1.0,
+                max: 1.0,
+                symmetric_about_zero: true,
+                auto: AutoRange::Manual,
+            },
+            colormap: Colormap::preset("coolwarm").unwrap(),
+            ..ContourSpec::default()
+        });
+
+        let scene = PanelScene {
+            panel,
+            style: ta_core::PublicationStyle::default(),
+            series: Vec::new(),
+            heatmap: Some(Rc::new(HeatmapSource {
+                wavelength,
+                delay,
+                matrix: Arc::new(matrix),
+                spec: ContourSpec::default(),
+                sampling: ta_plot::RasterSampling::Nearest,
+                background: InkColor::rgb(255, 255, 255),
+                source: None,
+            })),
+            background: InkColor::rgb(255, 255, 255),
+            cursors: Vec::new(),
+            show_crosshair: false,
+            accent: InkColor::rgb(0, 0, 0),
+        };
+        let state = PlotState::new((500.0, 539.0), (0.0, 19.0));
+        let cache: SharedHeatmapCache = Rc::new(RefCell::new(HeatmapCache::new()));
+        let frame = compute_frame(&scene, &state, (400.0, 300.0), true, &cache);
+
+        let (plot_width, plot_height) = frame.layout.plot_size();
+        let bitmap = frame
+            .buffer
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                ta_plot::DrawCommand::Bitmap { size, .. } => Some(*size),
+                _ => None,
+            })
+            .expect("the frame carries a colour-mapped image");
+        assert_eq!(
+            (bitmap.0 as f64, bitmap.1 as f64),
+            (
+                plot_width.round().max(2.0),
+                plot_height.round().max(2.0)
+            ),
+            "the image is {bitmap:?} but the plot rectangle is {plot_width} × {plot_height}"
+        );
+        // And it is placed at the plot rectangle's corner.
+        let position = frame
+            .buffer
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                ta_plot::DrawCommand::Bitmap { position, .. } => Some(*position),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(position.0, frame.layout.plot.x0.round() as i32);
+        assert_eq!(position.1, frame.layout.plot.y0.round() as i32);
+        assert!(frame.heatmap.is_some(), "the frame remembers which raster it drew");
     }
 
     #[test]
