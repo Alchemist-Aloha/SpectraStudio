@@ -28,6 +28,37 @@ that spine, or replaces a placeholder with the real engine.
 | M8 | Glotaran integration and parity audit | §16, §2 | ta-glotaran, ta-tests | Legacy `.ascii` and pyglotaran-compatible export; Glotaran result import (single and batch); streak-camera import; Gaussian helpers; a written feature-parity audit naming every Python feature and where it now lives. |
 | M9 | Polish and release | §21, §23.8, §24 | all | Performance targets of §21 measured and recorded; memory profiled; Linux package built and launched; macOS/Windows build checked; sample project and user documentation; §24 acceptance list walked item by item with evidence. |
 
+## Progress
+
+| # | Milestone | State |
+|---|---|---|
+| M0 | Workspace and toolchain | **done** — nine crates, `cargo test --workspace` green, no crate needs GPUI to be tested |
+| M1 | Data layer and persistence | **done** — NIR800 imports and matches numpy; projects round-trip with bit-identical matrices; the version graph prunes what it removes |
+| M2 | Interactive plotting engine | **partly done** — scales, viewport, contours, raster, ticks, Plotters rendering, SVG/PNG export and the recording backend are in and tested (194 tests). Still to do: the `ta-plot-gpui` element that replays a recorded frame through GPUI and turns pointer input into viewport changes |
+| M3 | Application shell, explorer, linked views | not started — this is the end of the MVP |
+| M4 | Processing | background subtraction, crop and averaging are in `ta-processing` and tested; time-zero, reference subtraction, photodegradation and stitching remain |
+| M5–M9 | Fitting, comparison, FigureStudio, Glotaran, release | not started |
+
+## Third deliberate deviation: filled contour levels
+
+`spec.md` §6.5 asks for "true contour isolines and filled contour levels
+independently of the heatmap display". The isolines are true marching squares
+(`ta_plot::contour::isolines`). The *filled* levels are drawn as a
+level-quantised raster (`RasterSampling::Levels`) rather than as filled polygons:
+a 1340 × 152 grid has 200 000 cells, and emitting a filled quad per cell is
+precisely the "millions of individual rectangular drawing primitives" the same
+section forbids. The levels the user edits are still honoured exactly — they
+decide the colour boundaries — and the isolines give the geometric edges. Polygon
+rings for a band are available (`band_rings`) for interactions that need a closed
+region.
+
+## Fourth deliberate deviation: stroke widths are whole numbers
+
+Plotters' `ShapeStyle` takes an integer stroke width, so a 0.75 pt spine becomes
+one unit. In the SVG export one unit is one point (the header is rewritten to
+declare points), so a line width of 1 means 1 pt — the units a journal asks for.
+Sub-point widths would need a Plotters change and are not attempted.
+
 ## Ordering rules
 
 - A milestone is done when its exit criteria run, not when its code is written.
