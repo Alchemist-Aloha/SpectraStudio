@@ -8,3 +8,4 @@ ta-core.workspace = true
 ta-plot.workspace = true
 gpui-kit.workspace = true
 image.workspace = true
+ndarray.workspace = true

@@ -279,6 +279,27 @@ impl DrawingBackend for CommandRecorder {
     }
 }
 
+/// Records one panel into a command buffer.
+///
+/// The single entry point the interactive layer needs: it never has to know
+/// that Plotters is behind it.
+#[allow(clippy::too_many_arguments)]
+pub fn record_panel(
+    panel: &ta_core::PanelModel,
+    style: &ta_core::PublicationStyle,
+    layout: &crate::render::PanelLayout,
+    viewport: &crate::viewport::PlotViewport,
+    series: &[crate::render::PlottedSeries],
+    heatmap: Option<&crate::render::HeatmapLayer>,
+    size: (u32, u32),
+) -> CommandBuffer {
+    use plotters::drawing::IntoDrawingArea;
+    let recorder = CommandRecorder::new(size);
+    let root = recorder.clone().into_drawing_area();
+    let _ = crate::render::draw_panel(&root, panel, style, layout, viewport, series, heatmap);
+    recorder.snapshot()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

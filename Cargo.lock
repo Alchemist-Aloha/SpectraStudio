@@ -6876,6 +6876,7 @@ version = "0.1.0"
 dependencies = [
  "gpui-kit",
  "image 0.25.10",
+ "ndarray",
  "ta-core",
  "ta-plot",
 ]

@@ -28,6 +28,6 @@ pub use render::{
     dash_polyline, render_panel, HeatmapLayer, PanelLayout, PlottedSeries, Rect,
 };
 pub use commands::{CommandBuffer, DrawCommand, StrokeStyle, TextAnchor};
-pub use record::CommandRecorder;
+pub use record::{record_panel, CommandRecorder};
 pub use scale::Scale;
 pub use viewport::PlotViewport;

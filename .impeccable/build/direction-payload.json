@@ -1,0 +1,224 @@
+{
+  "title": "Choose the visual world",
+  "question": "The roll assigned the Chart Plate direction. Keep it, take an alternate, or re-roll.",
+  "options": [
+    {
+      "id": "assigned",
+      "label": "The Chart Plate",
+      "kicker": "THE ROLL",
+      "lineage": "observatory chart-plate atlases: ruled coordinate grids, magnitude legends, marginal catalogue numbers",
+      "thesis": "The analysis screen as a printed chart plate: luminous data fields ruled by coordinate grids whose numbers run out into the plate margin, and a legend that grades how much of the signal is real.",
+      "palette": [
+        "#141a2e",
+        "#eef1f6",
+        "#ffffff",
+        "#1f9bb0",
+        "#b8791f"
+      ],
+      "materials": [
+        "hairline coordinate grid",
+        "tabular marginalia",
+        "magnitude legend"
+      ],
+      "viewport": "Deep-ink rail on the left carrying dataset plates by number; four white data plates in the centre (contour above, kinetics and spectra below, colour legend beside); chart-paper inspector on the right with the magnitude legend at its head; status bar of tabular figures along the bottom.",
+      "risk": "Dark chrome around luminous plates reads as a lit object in a dim room; in a bright office it can drift towards an IDE theme.",
+      "raised": [
+        {
+          "from": "challenger-doujin",
+          "raise": "Every object's identity is also its address — dataset ▸ version ▸ selection — printed and clickable in the status bar, so the index and the working space are the same object."
+        },
+        {
+          "from": "challenger-metro",
+          "raise": "Panel headers are a word on a hairline rule: no boxes, no icons standing in for labels."
+        },
+        {
+          "from": "challenger-ikeda",
+          "raise": "The plate margin is a data region — dense tabular figures at the edge instead of floating readouts over the data."
+        }
+      ],
+      "html": ".impeccable/mocks/decision/assigned.html",
+      "htmlFrame": "1440x900"
+    },
+    {
+      "id": "model-pick",
+      "label": "The Figure Page",
+      "kicker": "IMPECCABLE’S PICK",
+      "lineage": "journal figure pages — hairline rules, 8 pt marginalia, ranked captions beneath every panel",
+      "thesis": "The application is the figure: every plate is a journal panel with its ranked caption, and the analysis history is the caption that grows as you work.",
+      "palette": [
+        "#ffffff",
+        "#101526",
+        "#8a94a8",
+        "#b02a37"
+      ],
+      "materials": [
+        "hairline rule",
+        "small-caps panel letter",
+        "ranked caption"
+      ],
+      "viewport": "White throughout; a thin header of rules and small-caps section marks; the centre is one figure block, (a) contour over (b) kinetics over (c) spectra, each with its caption under it; a right column of caption-and-control pairs; the export row sits at the foot.",
+      "risk": "Also the direction most runs of this category land on — a white scientific workstation with one accent is the familiar answer, and its distinctiveness depends on the captions genuinely carrying the state.",
+      "html": ".impeccable/mocks/decision/model-pick.html",
+      "htmlFrame": "1440x900"
+    },
+    {
+      "id": "challenger-wayfinding",
+      "label": "Terminal Wayfinding",
+      "verdict": "competitive",
+      "lineage": "airport sign systems: saturated yellow bands, humanist sans, monumental gate numbers",
+      "thesis": "The screen signs itself: one message per band, the current quantity at monumental scale, and the inspector always naming the next decision.",
+      "palette": [
+        "#f2c200",
+        "#111111",
+        "#ffffff",
+        "#6b6b6b"
+      ],
+      "materials": [
+        "framed overhead band",
+        "monumental figure",
+        "edge-locked arrow"
+      ],
+      "case": "Fuses cleanly for identification — everyone reads these instantly — and loses narrowly on clarity, because one message per band costs the density a working analysis screen needs.",
+      "risk": "Monumental numbers on a dense working screen are a costume of the airport rather than a tool for the lab.",
+      "html": ".impeccable/mocks/decision/challenger-wayfinding.html",
+      "hero": "https://impeccable.style/worlds/cards/wayfinding-cartography-signage-terminal-yellow-wayfinding-hero.webp",
+      "board": "https://impeccable.style/worlds/cards/wayfinding-cartography-signage-terminal-yellow-wayfinding.webp"
+    },
+    {
+      "id": "challenger-boarding",
+      "label": "Gate Board",
+      "verdict": "competitive",
+      "lineage": "boarding pass and departure board: segmented pass, tabular figures, rows that rerank in place",
+      "thesis": "The processing chain is a segmented pass and the derived versions are a board that reranks in place, each changed row holding its alert colour until it has been seen.",
+      "palette": [
+        "#f4f5f7",
+        "#16181d",
+        "#1f9bb0",
+        "#c8791f"
+      ],
+      "materials": [
+        "segmented document",
+        "tabular figures",
+        "in-place rerank"
+      ],
+      "case": "Fuses cleanly — a reranking board is exactly what a recomputing version list is — and holds clarity; loses identification slightly, since a travel document is not this audience's own artefact.",
+      "risk": "A segmented pass around every panel turns the workspace into paper ephemera rather than a screen.",
+      "html": ".impeccable/mocks/decision/challenger-boarding.html",
+      "hero": "https://impeccable.style/worlds/cards/vernacular-ephemera-boarding-pass-and-gate-board-hero.webp",
+      "board": "https://impeccable.style/worlds/cards/vernacular-ephemera-boarding-pass-and-gate-board.webp"
+    },
+    {
+      "id": "challenger-folio",
+      "label": "Seasonal Folio",
+      "verdict": "competitive",
+      "lineage": "botanical folio plates: one subject through its stages, every plate at the same exact scale and ground",
+      "thesis": "Every comparison renders at one shared scale on one ground, each plate captioned in ranked order so the difference between stages is the only thing that moves.",
+      "palette": [
+        "#f7f4ec",
+        "#4a4438",
+        "#5c7a4a",
+        "#a83232",
+        "#8a8577"
+      ],
+      "materials": [
+        "fixed-scale plate",
+        "banded baseline",
+        "ranked caption"
+      ],
+      "case": "Fuses cleanly for clarity — fixed scale is a real discipline for comparing spectra over time — and holds identification through the scientific-plate tradition; loses narrowly because the folio's warmth is a plate ground, not a working screen's.",
+      "risk": "Cream plates and engraved warmth read as a coffee-table book the moment density drops.",
+      "html": ".impeccable/mocks/decision/challenger-folio.html",
+      "hero": "https://impeccable.style/worlds/cards/editorial-sequence-montage-botanical-folio-season-hero.webp",
+      "board": "https://impeccable.style/worlds/cards/editorial-sequence-montage-botanical-folio-season.webp"
+    },
+    {
+      "id": "challenger-doujin",
+      "label": "Event Catalog",
+      "verdict": "declined",
+      "lineage": "convention-circle catalogues: hundreds of postage-stamp thumbnails packed into a numbered hall grid",
+      "palette": [
+        "#f2efe6",
+        "#1a1a1a",
+        "#c8442a"
+      ],
+      "materials": [
+        "newsprint",
+        "thumbnail grid",
+        "hall map"
+      ],
+      "case": "Loses both axes: a doujin event catalogue is not this audience's ritual, and packing a working screen with hand-marked thumbnails costs the density real data needs.",
+      "kept": "The index and the working space are one object: a selection carries its position, and the position is the link.",
+      "hero": "https://impeccable.style/worlds/cards/pop-culture-shelf-doujin-event-catalog-hero.webp"
+    },
+    {
+      "id": "challenger-metro",
+      "label": "Metro Tiles",
+      "verdict": "declined",
+      "lineage": "metro typographic tiles: flat colour fields, giant lowercase cropped off the edge, chrome deleted",
+      "palette": [
+        "#000000",
+        "#00e5ff",
+        "#ff00a0",
+        "#ccff00"
+      ],
+      "materials": [
+        "flat tile",
+        "cropped headline",
+        "live flip"
+      ],
+      "case": "Loses both axes: its identification belongs to designers rather than spectroscopists, and a luminance-strobing tile field actively fights a screen read for subtle colour differences.",
+      "kept": "Chrome deleted so type does the work — a header is a word on a rule, not a container.",
+      "hero": "https://impeccable.style/worlds/cards/digital-design-canon-metro-typographic-tiles-hero.webp"
+    },
+    {
+      "id": "challenger-ikeda",
+      "label": "Data Field",
+      "verdict": "declined",
+      "lineage": "data-sublime fields: dense barcode columns and sine lattices in pure black and white",
+      "palette": [
+        "#000000",
+        "#ffffff",
+        "#8f8f8f"
+      ],
+      "materials": [
+        "hairline column",
+        "strobing lattice",
+        "packed numeric margin"
+      ],
+      "case": "Loses both axes as a screen: its strobe is a mural rather than a workspace, and the identification it does hold — data graphics as a tradition — is spent on dazzle instead of on reading a value.",
+      "kept": "The margin as a data region: dense tabular figures packed at the edge rather than floating readouts over the data.",
+      "hero": "https://impeccable.style/style/worlds/cards/ikeda-datamatics-hero.webp"
+    }
+  ],
+  "reroll": {
+    "registers": [
+      "safer",
+      "bolder"
+    ]
+  },
+  "buildPath": {
+    "value": "code",
+    "toggle": false
+  },
+  "canon": true,
+  "canonCard": {
+    "label": "The category standard",
+    "thesis": "The dockable scientific workstation, executed at full craft: a dark grey shell, panels and tabs around a plot, a tree on the left, an inspector on the right.",
+    "palette": [
+      "#1b1e24",
+      "#2a2f38",
+      "#e6e8ec",
+      "#3b82f6"
+    ],
+    "materials": [
+      "panel chrome",
+      "tab strip",
+      "blue accent"
+    ],
+    "viewport": "Grey rail, tabbed centre with a large contour plot, kinetics beside it, a version tree on the left, an inspector of labelled fields on the right, a progress strip at the foot.",
+    "risk": "Indistinguishable from the tools this audience already uses, by design.",
+    "html": ".impeccable/mocks/decision/canon.html",
+    "htmlFrame": "1440x900"
+  },
+  "steer": true
+}
