@@ -204,6 +204,135 @@ impl PlotState {
             .pixel_to_data(pixel.0, pixel.1)
     }
 
+    /// What a pointer move does: hover, pan, or drag a rectangle.
+    ///
+    /// This lives on the state rather than in the event handler so the handler
+    /// takes exactly one borrow — which is what a `match` on a borrowed cell
+    /// cannot do — and so the behaviour can be tested without a window.
+    pub fn on_pointer_move(
+        &mut self,
+        local: (f64, f64),
+        data: Option<(f64, f64)>,
+        x_scale: Scale,
+        y_scale: Scale,
+        pixels: (f64, f64),
+    ) -> Option<PlotGesture> {
+        match self.drag {
+            DragState::Idle => {
+                if self.hover == data {
+                    return None;
+                }
+                self.hover = data;
+                Some(PlotGesture::Hover(data))
+            }
+            DragState::Panning { last } => {
+                let (dx, dy) = (local.0 - last.0, local.1 - last.1);
+                if dx == 0.0 && dy == 0.0 {
+                    return None;
+                }
+                self.pan_pixels(dx, dy, x_scale, y_scale, pixels);
+                self.drag = DragState::Panning { last: local };
+                Some(PlotGesture::Pan { dx, dy })
+            }
+            DragState::Box { from } => {
+                let region = self.region_between(from, local, x_scale, y_scale, pixels);
+                if self.region == Some(region) {
+                    return None;
+                }
+                self.region = Some(region);
+                Some(PlotGesture::RegionPreview {
+                    from: region.0,
+                    to: region.1,
+                })
+            }
+        }
+    }
+
+    /// What a press begins.
+    pub fn on_press(
+        &mut self,
+        local: (f64, f64),
+        data: Option<(f64, f64)>,
+        extend: bool,
+    ) -> Option<PlotGesture> {
+        match self.interaction {
+            Interaction::Pan => {
+                self.drag = DragState::Panning { last: local };
+                None
+            }
+            Interaction::BoxZoom | Interaction::Region => {
+                self.drag = DragState::Box { from: local };
+                self.region = None;
+                None
+            }
+            Interaction::Cursor => data.map(|data| PlotGesture::Select { data, extend }),
+        }
+    }
+
+    /// What a release finishes: a drag, a zoom, a region, or a click.
+    pub fn on_release(
+        &mut self,
+        to: (f64, f64),
+        data: Option<(f64, f64)>,
+        extend: bool,
+        x_scale: Scale,
+        y_scale: Scale,
+        pixels: (f64, f64),
+    ) -> Option<PlotGesture> {
+        let drag = std::mem::replace(&mut self.drag, DragState::Idle);
+        let DragState::Box { from } = drag else {
+            return None;
+        };
+        // A couple of pixels is a click, not a drag.
+        let too_small = (to.0 - from.0).abs() < 3.0 || (to.1 - from.1).abs() < 3.0;
+        if self.interaction == Interaction::BoxZoom && !too_small {
+            if self.box_zoom(from, to, x_scale, y_scale, pixels) {
+                return Some(PlotGesture::BoxZoom {
+                    from: self.x_range,
+                    to: self.y_range,
+                });
+            }
+            return None;
+        }
+        let region = self.region_between(from, to, x_scale, y_scale, pixels);
+        self.region = None;
+        if too_small {
+            return data.map(|data| PlotGesture::Select { data, extend });
+        }
+        self.selected_region = Some(region);
+        Some(PlotGesture::Region {
+            from: region.0,
+            to: region.1,
+        })
+    }
+
+    /// What the wheel does: zoom about the pointer, on one axis or both.
+    pub fn on_wheel(
+        &mut self,
+        anchor: (f64, f64),
+        steps: f64,
+        x_only: bool,
+        y_only: bool,
+        x_scale: Scale,
+        y_scale: Scale,
+        pixels: (f64, f64),
+    ) -> Option<PlotGesture> {
+        if steps == 0.0 {
+            return None;
+        }
+        // A notch is about a tenth of the window; scrolling up zooms in.
+        let factor = 0.9f64.powf(steps);
+        let factors = if x_only {
+            (factor, 1.0)
+        } else if y_only {
+            (1.0, factor)
+        } else {
+            (factor, factor)
+        };
+        self.zoom_at(anchor, factors, x_scale, y_scale, pixels);
+        Some(PlotGesture::Zoom { anchor, factors })
+    }
+
     /// The physical coordinate behind two pixels, in either drag direction.
     pub fn region_between(
         &self,
@@ -701,17 +830,13 @@ fn to_hsla(color: InkColor) -> gpui_kit::Hsla {
     value
 }
 
-/// Where a window position sits inside the plot rectangle.
-fn in_plot(position: Point<Pixels>, origin: Point<Pixels>, plot: (f64, f64)) -> (f64, f64) {
-    let _ = plot;
-    (
-        position.x.as_f32() as f64 - (origin.x.as_f32() as f64),
-        position.y.as_f32() as f64 - (origin.y.as_f32() as f64),
-    )
-}
-
 /// Registers hover, press, release and wheel handling against the layout that
 /// was just computed.
+///
+/// Every handler follows the same shape: read what it needs out of the frame
+/// (a different cell), take exactly one borrow of the state, ask the state what
+/// the gesture means, release the borrow, then tell the owner. A `match` on a
+/// borrowed cell would hold that borrow through every arm.
 fn register_pointer_handlers(
     window: &mut Window,
     bounds: Bounds<Pixels>,
@@ -765,47 +890,13 @@ fn register_pointer_handlers(
                         },
                     )
                 };
-                let local = in_plot(event.position, bounds.origin, (plot.x0, plot.y0));
-                let local = (local.0 - plot.x0, local.1 - plot.y0);
+                let local = plot_local(event.position, bounds.origin, plot);
                 let (x_scale, y_scale) = scales();
-
-                match state_handle.borrow().drag {
-                    DragState::Idle => {
-                        let changed = state_handle.borrow().hover != data;
-                        if changed {
-                            state_handle.borrow_mut().hover = data;
-                            emit(PlotGesture::Hover(data), window, cx);
-                        }
-                    }
-                    DragState::Panning { last } => {
-                        let (dx, dy) = (local.0 - last.0, local.1 - last.1);
-                        if dx == 0.0 && dy == 0.0 {
-                            return;
-                        }
-                        {
-                            let mut state = state_handle.borrow_mut();
-                            state.pan_pixels(dx, dy, x_scale, y_scale, pixels);
-                            state.drag = DragState::Panning { last: local };
-                        }
-                        emit(PlotGesture::Pan { dx, dy }, window, cx);
-                    }
-                    DragState::Box { from } => {
-                        let region = state_handle.borrow().region_between(
-                            from, local, x_scale, y_scale, pixels,
-                        );
-                        if state_handle.borrow().region == Some(region) {
-                            return;
-                        }
-                        state_handle.borrow_mut().region = Some(region);
-                        emit(
-                            PlotGesture::RegionPreview {
-                                from: region.0,
-                                to: region.1,
-                            },
-                            window,
-                            cx,
-                        );
-                    }
+                let gesture = state_handle.borrow_mut().on_pointer_move(
+                    local, data, x_scale, y_scale, pixels,
+                );
+                if let Some(gesture) = gesture {
+                    emit(gesture, window, cx);
                 }
             },
         );
@@ -840,22 +931,12 @@ fn register_pointer_handlers(
                         frame.data_at(event.position, bounds.origin),
                     )
                 };
-                let local = in_plot(event.position, bounds.origin, (plot.x0, plot.y0));
-                let local = (local.0 - plot.x0, local.1 - plot.y0);
-                match state_handle.borrow().interaction {
-                    Interaction::Pan => {
-                        state_handle.borrow_mut().drag = DragState::Panning { last: local };
-                    }
-                    Interaction::BoxZoom | Interaction::Region => {
-                        state_handle.borrow_mut().drag = DragState::Box { from: local };
-                        state_handle.borrow_mut().region = None;
-                    }
-                    Interaction::Cursor => {
-                        if let Some(data) = data {
-                            let extend = event.modifiers.shift;
-                            emit(PlotGesture::Select { data, extend }, window, cx);
-                        }
-                    }
+                let local = plot_local(event.position, bounds.origin, plot);
+                let gesture = state_handle
+                    .borrow_mut()
+                    .on_press(local, data, event.modifiers.shift);
+                if let Some(gesture) = gesture {
+                    emit(gesture, window, cx);
                 }
             },
         );
@@ -872,10 +953,6 @@ fn register_pointer_handlers(
                 if event.button != MouseButton::Left {
                     return;
                 }
-                let drag = state_handle.borrow().drag;
-                if drag == DragState::Idle {
-                    return;
-                }
                 let (plot, pixels, data) = {
                     let frame = frame_handle.borrow();
                     let Some(frame) = frame.as_ref() else {
@@ -884,70 +961,21 @@ fn register_pointer_handlers(
                     (
                         frame.layout.plot,
                         frame.plot_pixels(),
-                        frame.data_at(
-                            bounds_clamp(event.position, bounds),
-                            bounds.origin,
-                        ),
+                        frame.data_at(bounds_clamp(event.position, bounds), bounds.origin),
                     )
                 };
-                let local = in_plot(event.position, bounds.origin, (plot.x0, plot.y0));
-                let to = (local.0 - plot.x0, local.1 - plot.y0);
+                let to = plot_local(event.position, bounds.origin, plot);
                 let (x_scale, y_scale) = scales();
-                state_handle.borrow_mut().drag = DragState::Idle;
-
-                match drag {
-                    DragState::Idle => {}
-                    DragState::Panning { .. } => {}
-                    DragState::Box { from } => {
-                        let too_small = (to.0 - from.0).abs() < 3.0 || (to.1 - from.1).abs() < 3.0;
-                        match state_handle.borrow().interaction {
-                            Interaction::BoxZoom if !too_small => {
-                                let zoomed = state_handle.borrow_mut().box_zoom(
-                                    from, to, x_scale, y_scale, pixels,
-                                );
-                                if zoomed {
-                                    let (x_range, y_range) = {
-                                        let state = state_handle.borrow();
-                                        (state.x_range, state.y_range)
-                                    };
-                                    emit(
-                                        PlotGesture::BoxZoom {
-                                            from: x_range,
-                                            to: y_range,
-                                        },
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            }
-                            _ => {
-                                let region = state_handle.borrow().region_between(
-                                    from, to, x_scale, y_scale, pixels,
-                                );
-                                state_handle.borrow_mut().region = None;
-                                if too_small {
-                                    if let Some(data) = data {
-                                        let extend = event.modifiers.shift;
-                                        emit(
-                                            PlotGesture::Select { data, extend },
-                                            window,
-                                            cx,
-                                        );
-                                    }
-                                } else {
-                                    state_handle.borrow_mut().selected_region = Some(region);
-                                    emit(
-                                        PlotGesture::Region {
-                                            from: region.0,
-                                            to: region.1,
-                                        },
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            }
-                        }
-                    }
+                let gesture = state_handle.borrow_mut().on_release(
+                    to,
+                    data,
+                    event.modifiers.shift,
+                    x_scale,
+                    y_scale,
+                    pixels,
+                );
+                if let Some(gesture) = gesture {
+                    emit(gesture, window, cx);
                 }
             },
         );
@@ -977,33 +1005,38 @@ fn register_pointer_handlers(
                     };
                     (frame.layout.plot, frame.plot_pixels())
                 };
-                let local = in_plot(event.position, bounds.origin, (plot.x0, plot.y0));
-                let anchor = (local.0 - plot.x0, local.1 - plot.y0);
-
-                // A notch is about a tenth of the window; scrolling up zooms in.
+                let anchor = plot_local(event.position, bounds.origin, plot);
                 let steps = match event.delta {
                     ScrollDelta::Lines(delta) => delta.y as f64,
                     ScrollDelta::Pixels(delta) => delta.y.as_f32() as f64 / 40.0,
                 };
-                if steps == 0.0 {
-                    return;
+                let gesture = state_handle.borrow_mut().on_wheel(
+                    anchor,
+                    steps,
+                    event.modifiers.shift,
+                    event.modifiers.alt || event.modifiers.control,
+                    scales().0,
+                    scales().1,
+                    pixels,
+                );
+                if let Some(gesture) = gesture {
+                    emit(gesture, window, cx);
                 }
-                let factor = 0.9f64.powf(steps);
-                let factors = if event.modifiers.shift {
-                    (factor, 1.0)
-                } else if event.modifiers.alt || event.modifiers.control {
-                    (1.0, factor)
-                } else {
-                    (factor, factor)
-                };
-                let (x_scale, y_scale) = scales();
-                state_handle
-                    .borrow_mut()
-                    .zoom_at(anchor, factors, x_scale, y_scale, pixels);
-                emit(PlotGesture::Zoom { anchor, factors }, window, cx);
             },
         );
     }
+}
+
+/// A window position in the plot rectangle's own pixels.
+fn plot_local(
+    position: Point<Pixels>,
+    origin: Point<Pixels>,
+    plot: ta_plot::render::Rect,
+) -> (f64, f64) {
+    (
+        position.x.as_f32() as f64 - origin.x.as_f32() as f64 - plot.x0,
+        position.y.as_f32() as f64 - origin.y.as_f32() as f64 - plot.y0,
+    )
 }
 
 fn bounds_clamp(position: Point<Pixels>, bounds: Bounds<Pixels>) -> Point<Pixels> {
@@ -1175,6 +1208,148 @@ mod tests {
         assert_eq!(forward, backward);
         assert!(forward.0 .0 < forward.1 .0);
         assert!(forward.0 .1 < forward.1 .1);
+    }
+
+    #[test]
+    fn a_drag_pans_and_a_release_ends_it_without_touching_the_cell_twice() {
+        // The handler used to hold a borrow of the state while an arm took a
+        // second one, which panicked on the first mouse move. The state machine
+        // is what the handler now calls, so this is the path that crashed.
+        let mut state = state();
+        let pixels = (400.0, 200.0);
+        let (x_scale, y_scale) = (Scale::Linear, Scale::Linear);
+
+        assert!(state.on_press((200.0, 100.0), Some((0.0, 0.0)), false).is_none());
+        let before = state.x_range;
+
+        let moved = state.on_pointer_move(
+            (240.0, 100.0),
+            Some((2.0, 0.0)),
+            x_scale,
+            y_scale,
+            pixels,
+        );
+        assert!(matches!(moved, Some(PlotGesture::Pan { .. })));
+        // Dragging the data right moves the window left.
+        assert!(state.x_range.0 < before.0);
+
+        assert!(state
+            .on_release((240.0, 100.0), Some((2.0, 0.0)), false, x_scale, y_scale, pixels)
+            .is_none());
+        assert_eq!(state.drag, DragState::Idle);
+
+        // A hover after the drag reports the new coordinate and cannot panic.
+        let hover = state.on_pointer_move(
+            (300.0, 120.0),
+            Some((5.0, 0.1)),
+            x_scale,
+            y_scale,
+            pixels,
+        );
+        assert_eq!(hover, Some(PlotGesture::Hover(Some((5.0, 0.1)))));
+        // Repeating the same position reports nothing, so no repaint is asked
+        // for on every idle frame.
+        assert_eq!(
+            state.on_pointer_move((301.0, 121.0), Some((5.0, 0.1)), x_scale, y_scale, pixels),
+            None
+        );
+    }
+
+    #[test]
+    fn a_box_zoom_drag_reports_the_new_window_and_a_click_selects_instead() {
+        let mut zooming = state();
+        zooming.interaction = Interaction::BoxZoom;
+        let pixels = (400.0, 200.0);
+        let (x_scale, y_scale) = (Scale::Linear, Scale::Linear);
+
+        zooming.on_press((100.0, 40.0), Some((-5.0, 0.3)), false);
+        let preview = zooming.on_pointer_move(
+            (300.0, 160.0),
+            Some((5.0, -0.3)),
+            x_scale,
+            y_scale,
+            pixels,
+        );
+        assert!(matches!(preview, Some(PlotGesture::RegionPreview { .. })));
+        assert!(zooming.region.is_some(), "the drag paints a rectangle");
+
+        let finished = zooming.on_release(
+            (300.0, 160.0),
+            Some((5.0, -0.3)),
+            false,
+            x_scale,
+            y_scale,
+            pixels,
+        );
+        match finished {
+            Some(PlotGesture::BoxZoom { from, to }) => {
+                assert!(from.0 < from.1 && to.0 < to.1);
+            }
+            other => panic!("expected a box zoom, got {other:?}"),
+        }
+        assert!(zooming.region.is_none(), "the rectangle is gone after the zoom");
+        assert!(zooming.x_range.1 - zooming.x_range.0 < 20.0);
+
+        // A press and release in the same place selects rather than zooming.
+        let mut clicking = state();
+        clicking.interaction = Interaction::BoxZoom;
+        let start = (200.0, 100.0);
+        clicking.on_press(start, Some((1.0, 0.0)), true);
+        let gesture =
+            clicking.on_release(start, Some((1.0, 0.0)), true, x_scale, y_scale, pixels);
+        assert_eq!(
+            gesture,
+            Some(PlotGesture::Select {
+                data: (1.0, 0.0),
+                extend: true
+            })
+        );
+        assert_eq!(clicking.x_range, (-10.0, 10.0), "a click must not zoom");
+    }
+
+    #[test]
+    fn a_region_drag_is_kept_for_the_owner_as_the_selection() {
+        let mut state = state();
+        state.interaction = Interaction::Region;
+        let pixels = (400.0, 200.0);
+        let (x_scale, y_scale) = (Scale::Linear, Scale::Linear);
+        state.on_press((120.0, 60.0), None, false);
+        state.on_pointer_move((280.0, 140.0), None, x_scale, y_scale, pixels);
+        let gesture =
+            state.on_release((280.0, 140.0), None, false, x_scale, y_scale, pixels);
+        match gesture {
+            Some(PlotGesture::Region { from, to }) => {
+                assert!(from.0 < to.0 && from.1 < to.1);
+            }
+            other => panic!("expected a region, got {other:?}"),
+        }
+        assert!(state.selected_region.is_some());
+    }
+
+    #[test]
+    fn the_wheel_zooms_on_the_axes_the_modifier_asks_for() {
+        let mut horizontal = state();
+        let pixels = (400.0, 200.0);
+        let (x_scale, y_scale) = (Scale::Linear, Scale::Linear);
+
+        // Shift: the delay axis alone.
+        let gesture =
+            horizontal.on_wheel((200.0, 100.0), 1.0, true, false, x_scale, y_scale, pixels);
+        assert!(matches!(gesture, Some(PlotGesture::Zoom { .. })));
+        assert!(horizontal.x_range.1 - horizontal.x_range.0 < 20.0);
+        assert_eq!(horizontal.y_range, (-0.5, 0.5));
+
+        // Alt or control: the absorbance axis alone.
+        let mut vertical = state();
+        vertical.on_wheel((200.0, 100.0), 1.0, false, true, x_scale, y_scale, pixels);
+        assert_eq!(vertical.x_range, (-10.0, 10.0));
+        assert!(vertical.y_range.1 - vertical.y_range.0 < 1.0);
+
+        // No movement is not a gesture.
+        assert_eq!(
+            vertical.on_wheel((200.0, 100.0), 0.0, false, false, x_scale, y_scale, pixels),
+            None
+        );
     }
 
     #[test]
