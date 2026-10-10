@@ -9,3 +9,4 @@ ndarray.workspace = true
 plotters.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+plotters-backend = "0.3.7"

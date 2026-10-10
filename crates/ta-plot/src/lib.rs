@@ -9,8 +9,10 @@
 //! * [`render`] draws a panel through Plotters.
 
 pub mod colormap;
+pub mod commands;
 pub mod contour;
 pub mod export;
+pub mod record;
 pub mod render;
 pub mod scale;
 pub mod ticks;
@@ -25,5 +27,7 @@ pub use render::{
     draw_panel,
     dash_polyline, render_panel, HeatmapLayer, PanelLayout, PlottedSeries, Rect,
 };
+pub use commands::{CommandBuffer, DrawCommand, StrokeStyle, TextAnchor};
+pub use record::CommandRecorder;
 pub use scale::Scale;
 pub use viewport::PlotViewport;
