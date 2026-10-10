@@ -164,16 +164,15 @@ impl PlotState {
         let before = self.image_zoom;
         self.image_zoom = (self.image_zoom * magnification).clamp(0.2, 8.0);
         let applied = if before > 0.0 { self.image_zoom / before } else { 1.0 };
-        // The page's centre sits at the pane's centre offset by the drag; keep
-        // the point under the pointer where it was by moving that offset.
+        // The page is drawn with its origin at `pane centre + offset`, at
+        // `zoom` pixels per point, so the figure coordinate under a pane point
+        // is `(point - centre - offset) / zoom`. Holding that still for the
+        // anchor is what keeps the paper under the pointer.
         let centre = (pane.0 / 2.0, pane.1 / 2.0);
-        let from_centre = (
-            anchor.0 as f32 - centre.0 as f32,
-            anchor.1 as f32 - centre.1 as f32,
-        );
+        let anchor = (anchor.0 - centre.0, anchor.1 - centre.1);
         self.image_offset = (
-            (self.image_offset.0 + from_centre.0) * applied - from_centre.0,
-            (self.image_offset.1 + from_centre.1) * applied - from_centre.1,
+            self.image_offset.0 * applied + anchor.0 as f32 * (1.0 - applied),
+            self.image_offset.1 * applied + anchor.1 as f32 * (1.0 - applied),
         );
     }
 
@@ -483,6 +482,13 @@ pub struct PlotFrame {
 
 impl PlotFrame {
     /// How the recorded figure maps into the plate.
+    /// How the recorded frame maps into the plate.
+    ///
+    /// The recording is already in device pixels — the canvas of a figure
+    /// preview *is* the figure at its zoom — so the map is the offset and
+    /// nothing else. Scaling here as well drew a preview at zoom squared, which
+    /// put the page's margins and axis titles outside the pane: "fit to pane"
+    /// then looked like a close-up of the axis region.
     pub fn transform(&self, bounds: Bounds<Pixels>) -> crate::replay::ReplayTransform {
         let plot = self.layout.plot;
         crate::replay::ReplayTransform::new(
@@ -490,7 +496,7 @@ impl PlotFrame {
                 bounds.origin.x + px(self.offset.0),
                 bounds.origin.y + px(self.offset.1),
             ),
-            self.zoom,
+            1.0,
         )
         .with_plot((plot.x0, plot.y0, plot.x1, plot.y1))
     }
@@ -520,11 +526,10 @@ impl PlotFrame {
     /// The physical coordinate of a window position.
     fn data_at(&self, window_position: Point<Pixels>, origin: Point<Pixels>) -> Option<(f64, f64)> {
         let local = window_position - origin;
-        // The pointer is in plate pixels; the layout is in figure points.
-        let x = (local.x.as_f32() - self.offset.0) as f64 / self.zoom.max(0.01) as f64
-            - self.layout.plot.x0;
-        let y = (local.y.as_f32() - self.offset.1) as f64 / self.zoom.max(0.01) as f64
-            - self.layout.plot.y0;
+        // The pointer, the recorded layout and the offset are all in plate
+        // pixels, so the only conversion is the offset.
+        let x = (local.x.as_f32() - self.offset.0) as f64 - self.layout.plot.x0;
+        let y = (local.y.as_f32() - self.offset.1) as f64 - self.layout.plot.y0;
         if !(0.0..=self.layout.plot.width()).contains(&x)
             || !(0.0..=(self.layout.plot.height())).contains(&y)
         {
@@ -578,7 +583,12 @@ fn compute_frame(
     let original = scene;
     let magnified: PanelScene;
     let scene: &PanelScene = if (zoom - 1.0).abs() > 1e-6 {
+        // The panel carries the per-axis type sizes as well as the style, and
+        // both have to be multiplied: scaling only the style left the axis
+        // titles at their unzoomed size, tiny beside the tick labels that did
+        // scale. The raster export already scales the panel for the same reason.
         magnified = PanelScene {
+            panel: ta_plot::export::scaled_panel(&original.panel, zoom as f64),
             style: ta_plot::export::scaled_style(&original.style, zoom as f64),
             series: ta_plot::export::scaled_series(&original.series, zoom as f64),
             ..(*original).clone()
@@ -589,10 +599,6 @@ fn compute_frame(
     };
     let (width, height) = recorded_size(scene, size, zoom as f64);
     if std::env::var_os("SPECTRA_TRACE").is_some() {
-        eprintln!(
-            "frame: pane {size:?} figure {:?} zoom {zoom:.4} offset {offset:?} recorded {width:.1}x{height:.1}",
-            scene.figure
-        );
     }
     let layout = PanelLayout::compute(
         &scene.panel,
@@ -661,6 +667,14 @@ fn compute_frame(
             }
         }
     }
+    if std::env::var_os("SPECTRA_TRACE").is_some() {
+        eprintln!(
+            "frame: pane {size:?} zoom {zoom:.4} offset {offset:?} page {width:.1}x{height:.1} plot {:?} colorbar {:?} available {:?}",
+            (layout.plot.x0, layout.plot.y0, layout.plot.x1, layout.plot.y1),
+            layout.colorbar.map(|bar| (bar.x0, bar.y0, bar.x1, bar.y1)),
+            layout.available,
+        );
+    }
     let viewport = layout.viewport(state.x_range, state.y_range, x_scale, y_scale);
 
     let mut panel = scene.panel.clone();
@@ -723,8 +737,10 @@ fn compute_frame(
         image_zoom: state.image_zoom,
         image_offset: state.image_offset,
         size,
-        panel: scene.panel.clone(),
-        series: scene.series.clone(),
+        // The *unscaled* panel and series: a frame is stale when the scene it
+        // was built from changed, not when the zoom changed the copy it drew.
+        panel: original.panel.clone(),
+        series: original.series.clone(),
         heatmap: heatmap_key,
         x_range: state.x_range,
         y_range: state.y_range,
@@ -1584,12 +1600,34 @@ mod tests {
         assert!((frame.zoom - 3.0).abs() < 1e-6, "zoom was {}", frame.zoom);
         assert_eq!(frame.offset, (0.0, 0.0));
         assert!((frame.points.0 - 702.0).abs() < 1e-6);
-        // The recorded type is the figure's type, three times over.
+        // The recorded type is the figure's type, three times over — the tick
+        // labels, the axis titles and the legend alike. A title left unscaled
+        // is a title that reads as a footnote beside its own axis.
         let sizes = text_sizes(&frame.buffer);
         assert!(
             sizes.iter().any(|size| (size - 8.0 * 3.0).abs() < 1e-6),
             "no text was drawn at 8 pt of a 3× figure: {sizes:?}"
         );
+        let axis_titles: Vec<f64> = frame
+            .buffer
+            .in_paint_order()
+            .into_iter()
+            .filter_map(|command| match command {
+                ta_plot::commands::DrawCommand::Text { text, size, .. }
+                    if text.contains("Delay") || text.contains("ΔOD") =>
+                {
+                    Some(*size)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!axis_titles.is_empty(), "the axis titles are drawn");
+        for size in &axis_titles {
+            assert!(
+                (size - 8.0 * 3.0).abs() < 1e-6,
+                "an axis title was drawn at {size} where the figure's own type is 24"
+            );
+        }
         assert!(
             frame
                 .buffer
@@ -1665,6 +1703,45 @@ mod tests {
             "the figure is centred vertically"
         );
         assert_eq!(frame.offset.0, 0.0);
+    }
+
+    #[test]
+    fn a_fitted_page_lands_inside_the_pane_it_is_fitted_to() {
+        // The defect this catches: the recording is already in device pixels,
+        // and the replay scaled it by the zoom a second time, so a fitted page
+        // was drawn zoom times too large and its margins fell outside the pane.
+        // "Fit to pane" has to mean the whole sheet is inside the pane.
+        let cache: SharedHeatmapCache = Rc::new(RefCell::new(HeatmapCache::new()));
+        let figure = (234.0, 180.0);
+        let (scene, state) = line_scene(PublicationStyle::default(), Some(figure));
+        for pane in [(371.0, 256.0), (702.0, 540.0), (903.0, 903.0), (200.0, 700.0)] {
+            let frame = compute_frame(&scene, &state, pane, true, &cache);
+            let bounds = Bounds::new(
+                gpui_kit::point(px(0.0), px(0.0)),
+                gpui_kit::size(px(pane.0 as f32), px(pane.1 as f32)),
+            );
+            // The drawn page is the recorded canvas, one for one.
+            let transform = frame.transform(bounds);
+            assert_eq!(
+                transform.scale, 1.0,
+                "the recorded frame is in device pixels and is not scaled again"
+            );
+            let drawn_width = transform.length(frame.points.0 as f32);
+            let drawn_height = transform.length(frame.points.1 as f32);
+            assert!(
+                drawn_width.as_f32() <= pane.0 as f32 + 1.0
+                    && drawn_height.as_f32() <= pane.1 as f32 + 1.0,
+                "a fitted page of {drawn_width:?} × {drawn_height:?} does not fit a pane of {pane:?}"
+            );
+            // And it is inside the pane, not hanging off it.
+            let corner = transform.map((frame.points.0, frame.points.1));
+            assert!(corner.x.as_f32() <= pane.0 as f32 + 1.0);
+            assert!(corner.y.as_f32() <= pane.1 as f32 + 1.0);
+            // One of the two dimensions is filled: a fit uses the room it has.
+            let fills_width = (drawn_width.as_f32() - pane.0 as f32).abs() < 1.0;
+            let fills_height = (drawn_height.as_f32() - pane.1 as f32).abs() < 1.0;
+            assert!(fills_width || fills_height, "a fit fills one dimension");
+        }
     }
 
     #[test]
@@ -1766,21 +1843,24 @@ mod tests {
                 .abs()
                 < 220.0
         );
-        // The point under the pointer stayed put.
-        let before = fitted
-            .transform(Bounds::new(
-                gpui_kit::point(px(0.0), px(0.0)),
-                gpui_kit::size(px(pane.0 as f32), px(pane.1 as f32)),
-            ))
-            .map((anchor.0, anchor.1));
-        let after = zoomed
-            .transform(Bounds::new(
-                gpui_kit::point(px(0.0), px(0.0)),
-                gpui_kit::size(px(pane.0 as f32), px(pane.1 as f32)),
-            ))
-            .map((anchor.0, anchor.1));
-        assert!((before.x.as_f32() - after.x.as_f32()).abs() < 1.0);
-        let _ = before.y;
+        // The point of the *paper* under the pointer stayed put: the pane
+        // point maps back to the same figure coordinate before and after.
+        let figure_at = |frame: &PlotFrame, pane_point: (f64, f64)| {
+            (
+                (pane_point.0 - frame.offset.0 as f64) / frame.zoom as f64,
+                (pane_point.1 - frame.offset.1 as f64) / frame.zoom as f64,
+            )
+        };
+        let before = figure_at(&fitted, anchor);
+        let after = figure_at(&zoomed, anchor);
+        assert!(
+            (before.0 - after.0).abs() < 0.05,
+            "the paper moved sideways under the pointer: {before:?} against {after:?}"
+        );
+        assert!(
+            (before.1 - after.1).abs() < 0.05,
+            "the paper moved vertically under the pointer: {before:?} against {after:?}"
+        );
     }
 
     #[test]

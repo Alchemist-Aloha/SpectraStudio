@@ -407,7 +407,7 @@ pub fn scaled_style(style: &PublicationStyle, scale: f64) -> PublicationStyle {
     scaled
 }
 
-fn scaled_panel(panel: &PanelModel, scale: f64) -> PanelModel {
+pub fn scaled_panel(panel: &PanelModel, scale: f64) -> PanelModel {
     if (scale - 1.0).abs() < 1e-9 {
         return panel.clone();
     }
