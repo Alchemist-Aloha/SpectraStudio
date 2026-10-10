@@ -392,7 +392,7 @@ where
     Ok(())
 }
 
-fn scaled_style(style: &PublicationStyle, scale: f64) -> PublicationStyle {
+pub fn scaled_style(style: &PublicationStyle, scale: f64) -> PublicationStyle {
     if (scale - 1.0).abs() < 1e-9 {
         return style.clone();
     }
@@ -423,7 +423,7 @@ fn scaled_panel(panel: &PanelModel, scale: f64) -> PanelModel {
     scaled
 }
 
-fn scaled_series(series: &[PlottedSeries], scale: f64) -> Vec<PlottedSeries> {
+pub fn scaled_series(series: &[PlottedSeries], scale: f64) -> Vec<PlottedSeries> {
     if (scale - 1.0).abs() < 1e-9 {
         return series.to_vec();
     }

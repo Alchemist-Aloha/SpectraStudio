@@ -152,6 +152,8 @@ pub struct PanelLayout {
     pub colorbar: Option<Rect>,
     pub x_ticks: Vec<f64>,
     pub y_ticks: Vec<f64>,
+    /// The widest y tick label, which decides where the axis title stands.
+    pub widest_y_label: f64,
 }
 
 impl PanelLayout {
@@ -186,10 +188,16 @@ impl PanelLayout {
             label_size * 1.25
         };
 
-        let mut left = widest_y_label + tick_len + 4.0;
-        let mut bottom = tallest_x_label + tick_len + 4.0;
-        let mut top = 4.0;
-        let mut right = 6.0;
+        // The gaps between a tick label and the axis are expressed in the type
+        // size rather than in points of paper. That keeps one layout linear in
+        // everything it is given, which is what lets a preview be the exported
+        // figure magnified: with an eight-point figure the numbers are the four
+        // and six points they always were.
+        let gap = label_size * 0.5;
+        let mut left = widest_y_label + tick_len + gap;
+        let mut bottom = tallest_x_label + tick_len + gap;
+        let mut top = gap;
+        let mut right = gap * 1.5;
 
         if !panel.y.label.is_empty() {
             left += label_size * 1.4;
@@ -202,7 +210,7 @@ impl PanelLayout {
         }
         let wants_colorbar = panel.colorbar.visible && panel.contour.is_some();
         if wants_colorbar {
-            right += 18.0 + label_size * 3.2;
+            right += label_size * 5.5;
         }
 
         // Never let the margins eat the whole panel.
@@ -222,11 +230,13 @@ impl PanelLayout {
             (available.1 - bottom).max(top + 1.0),
         );
         let colorbar = wants_colorbar.then(|| {
-            let bar_left = plot.x1 + 8.0;
+            let bar_left = plot.x1 + label_size;
             Rect::new(
                 bar_left,
                 plot.y0,
-                (available.0 - 4.0).min(bar_left + 12.0).max(bar_left + 1.0),
+                (available.0 - gap)
+                    .min(bar_left + label_size * 1.5)
+                    .max(bar_left + 1.0),
                 plot.y1,
             )
         });
@@ -237,6 +247,7 @@ impl PanelLayout {
             colorbar,
             x_ticks,
             y_ticks,
+            widest_y_label,
         }
     }
 
@@ -664,11 +675,16 @@ pub fn draw_panel<DB: plotters::prelude::DrawingBackend>(
         ))?;
     }
     if !panel.y.label.is_empty() {
+        // Up the left margin, centred on the plot. The anchor is the *centre* of
+        // the rotated text, and it is put in the middle of the strip the layout
+        // reserved for it. Anchoring it at the strip's edge — which is where the
+        // tick labels begin — wrote the axis name over those numbers.
         root.draw(&PlottersText::new(
             panel.y.labelled(),
             (
+                (plot.x0 - tick_length - layout.widest_y_label - tick_label_size * 0.7)
+                    .round() as i32,
                 ((plot.y0 + plot.y1) / 2.0).round() as i32,
-                (plot.x0 - tick_length - tick_label_size * 2.4).round() as i32,
             ),
             rotated_text_style(
                 status_size(style, panel.y.title_size),

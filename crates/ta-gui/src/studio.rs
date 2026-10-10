@@ -131,6 +131,10 @@ impl Workspace {
             FieldId::FigureTickSize => {
                 if let Some(value) = widgets::parse_number(text) {
                     let size = value.clamp(4.0, 24.0) as f32;
+                    // The style's size is the one the layout reserves room for,
+                    // so both agree or the margin is measured for the wrong
+                    // type.
+                    figure.style.tick_label_size = size;
                     for panel in &mut figure.panels {
                         panel.x.tick_label_size = size;
                         panel.y.tick_label_size = size;
@@ -140,6 +144,7 @@ impl Workspace {
             FieldId::LegendFontSize => {
                 if let Some(value) = widgets::parse_number(text) {
                     let size = value.clamp(4.0, 24.0) as f32;
+                    figure.style.legend_font_size = size;
                     for panel in &mut figure.panels {
                         panel.legend.font_size = size;
                     }
@@ -225,6 +230,10 @@ impl Workspace {
         figure.panels[0] = content.panel;
         figure.panels[0].legend.visible = count > 1;
         figure.panels[0].x.label = x_label;
+        // The plate's panel carries the working screen's type sizes; a figure
+        // is typed the way the figure says, so the three controls in the panel
+        // and the type on screen agree from the first moment.
+        figure.set_type_size(figure.style.base_font_size);
         // The records are the plate's own: a reference to a dataset and a
         // coordinate, not a copy of the numbers, so the studio edits the same
         // figure the plate was showing.
@@ -411,11 +420,12 @@ impl Workspace {
             records: panel.series.clone(),
         };
         // A plate with no saved series still shows what it was opened on: a
-        // contour, or the curve the plate drew.
+        // contour's isolines, or the curve the plate drew. The *panel* stays the
+        // figure's own — it is the thing the editor's controls change, and a
+        // contour has no series precisely because its field is the matrix.
         if content.series.is_empty() {
             let spec = plates::contour_spec(&self.session);
             let fresh = plates::content(&self.session, self.current_plate, &spec);
-            content.panel = fresh.panel;
             content.series = fresh.series;
         }
         Some(content)
@@ -877,6 +887,56 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_figure_opened_from_a_plate_is_typed_the_way_the_figure_says() {
+        // The plate's panel carries the working screen's sizes. A figure is
+        // typed at the figure's size, so the studio's three type controls and
+        // the type on screen agree as soon as the studio opens.
+        use crate::session::Session;
+        use ndarray::Array2;
+        use ta_core::{Axis, AxisKind, AxisUnit, SignalUnit, SourceFormat, TaDataset};
+
+        let wavelength = Axis::new(
+            AxisKind::Wavelength,
+            AxisUnit::Nanometer,
+            "Wavelength",
+            vec![500.0, 600.0, 700.0],
+        )
+        .unwrap();
+        let delay = Axis::new(
+            AxisKind::Delay,
+            AxisUnit::Picosecond,
+            "Delay",
+            vec![-1.0, 0.0, 1.0, 10.0],
+        )
+        .unwrap();
+        let data = Array2::from_elem((3, 4), 0.01);
+        let dataset = TaDataset::new_raw(
+            "test",
+            wavelength,
+            delay,
+            data,
+            SignalUnit::DeltaOpticalDensity,
+            SourceFormat::Synthetic,
+        )
+        .unwrap();
+        let mut session = Session::new();
+        session.open_dataset(dataset);
+        let mut workspace = crate::app::Workspace::new(session);
+        workspace.open_studio(crate::session::PlateId::Kinetics);
+
+        let figure = workspace.studio_figure().expect("the studio is open");
+        // The working plate's type is larger than a figure's.
+        let plate_type = crate::plates::style().tick_label_size;
+        assert!(plate_type > figure.style.tick_label_size);
+        let panel = figure.panel(0).unwrap();
+        assert_eq!(panel.x.tick_label_size, figure.style.tick_label_size);
+        assert_eq!(panel.y.tick_label_size, figure.style.tick_label_size);
+        assert_eq!(panel.x.title_size, figure.style.axis_title_size);
+        assert_eq!(panel.y.title_size, figure.style.axis_title_size);
+        assert_eq!(panel.legend.font_size, figure.style.legend_font_size);
+    }
 
     #[test]
     fn a_caption_becomes_a_file_stem() {

@@ -197,3 +197,19 @@ a paragraph attached.
   drawn in any figure (`SeriesSource::Fit`, `SeriesSource::Curve`), so a
   result-side parser would be a second result format for a question already
   answered here.
+
+## 12. Text the screen turns, and text the file turns
+
+* **Python:** matplotlib draws every label itself, including the rotated ones.
+* **Rust:** one drawing description, two backends. The exported SVG and PDF turn
+  an axis title with a `rotate` transform, and the on-screen backend paints the
+  same text through the same SVG renderer, so a caption that is vertical in the
+  figure is vertical on screen — at the figure's type size, in its margin, turned
+  the same way. An earlier version set such a caption upright across its anchor,
+  because GPUI's shaped lines cannot be rotated; the SVG renderer can rotate
+  anything, so the divergence is gone and the two backends agree.
+* **Proved by:** `ta-plot-gpui`'s preview tests (the drawn type is the
+  configured size at the pane's zoom, and the preview's layout is the export's
+  magnified) and `ta-plot`'s, which check that the axis title stands in the left
+  margin, clear of the tick labels, and that the x title is centred under the
+  plot.

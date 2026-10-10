@@ -309,12 +309,30 @@ impl Workspace {
         }
         self.fit_caption = crate::fit_panel::fit_caption(&self.session);
         self.show_time_zero = self.session.has_time_zero_correction();
-        match self.studio_preview() {
-            Some(content) => {
-                let scene = scene_of(content, views.clone(), None, Vec::new(), false);
+        // The studio's preview is the figure at its own physical size, with the
+        // figure's own type: changing the type size or the paper size has to be
+        // visible here, which is the whole point of the pane.
+        match (self.studio_preview(), self.session.studio.clone()) {
+            (Some(content), Some(figure)) => {
+                let size = ta_plot::export::figure_points(&figure);
+                // A contour preview needs the matrix as well as its isolines:
+                // without it the field is a blank page with outlines on it.
+                let heatmap = if self.current_plate == PlateId::Contour {
+                    self.contour_source.clone()
+                } else {
+                    None
+                };
+                let scene = scene_at_size(
+                    content,
+                    figure.style.clone(),
+                    heatmap,
+                    Vec::new(),
+                    false,
+                    Some(size),
+                );
                 sync_plate(&mut self.studio_plates, 0, scene, raster.clone(), true);
             }
-            None => self.studio_plates.clear(),
+            _ => self.studio_plates.clear(),
         }
         self.compare_caption = (
             self.session.comparison_caption(false),
@@ -1640,15 +1658,37 @@ fn scene_of(
     cursors: Vec<ta_plot_gpui::PlotCursor>,
     show_crosshair: bool,
 ) -> PanelScene {
+    scene_at_size(content, style, heatmap, cursors, show_crosshair, None)
+}
+
+/// The same, for a plate that previews a figure at its own physical size.
+#[allow(clippy::too_many_arguments)]
+fn scene_at_size(
+    content: PlateContent,
+    style: ta_core::PublicationStyle,
+    heatmap: Option<std::rc::Rc<HeatmapSource>>,
+    cursors: Vec<ta_plot_gpui::PlotCursor>,
+    show_crosshair: bool,
+    figure: Option<(f64, f64)>,
+) -> PanelScene {
     PanelScene {
         panel: content.panel,
         style,
         series: content.series,
         heatmap,
-        background: Rgba::rgb(255, 255, 255),
+        // A figure preview keeps the shell's ground and paints its page, so the
+        // sheet and its margins can be seen; a working plate is its own paper.
+        background: if figure.is_some() {
+            Rgba::rgb(238, 241, 246)
+        } else {
+            Rgba::rgb(255, 255, 255)
+        },
         cursors,
         show_crosshair,
         accent: plates::accent(),
+        page: figure.map(|_| Rgba::rgb(255, 255, 255)),
+        figure,
+        interactive: figure.is_none(),
     }
 }
 

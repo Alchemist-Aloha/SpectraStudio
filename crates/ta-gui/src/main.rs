@@ -32,6 +32,7 @@ fn main() {
     let mut plate = session::PlateId::Kinetics;
     let mut fit = false;
     let mut export = false;
+    let mut figure_preset: Option<ta_core::JournalPreset> = None;
     let mut initial: Vec<String> = Vec::new();
     let mut index = 0;
     while index < arguments.len() {
@@ -65,6 +66,14 @@ fn main() {
             "--export" => {
                 export = true;
                 index += 1;
+            }
+            "--figure" => {
+                figure_preset = match arguments.get(index + 1).map(String::as_str) {
+                    Some("double") => Some(ta_core::JournalPreset::JacsDoubleColumn),
+                    Some("single") => Some(ta_core::JournalPreset::JacsSingleColumn),
+                    _ => None,
+                };
+                index += 2;
             }
             other => {
                 initial.push(other.to_string());
@@ -100,6 +109,18 @@ fn main() {
                     workspace.open_studio(plate);
                 } else {
                     workspace.layout = layout;
+                }
+                if let Some(preset) = figure_preset {
+                    // A scripted check of the preview at another paper size,
+                    // which is otherwise one click away in the panel.
+                    if workspace.session.studio.is_none() {
+                        workspace.open_studio(plate);
+                    }
+                    if let Some(figure) = workspace.session.studio.as_mut() {
+                        figure.apply_preset(preset);
+                    }
+                    workspace.layout = app::Layout::Studio;
+                    workspace.touch();
                 }
                 if layout == app::Layout::Compare {
                     workspace.seed_comparison();

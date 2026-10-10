@@ -313,9 +313,13 @@ impl Workspace {
                                 div()
                                     .flex_1()
                                     .min_h(px(60.0))
-                                    .bg(ink::paper())
-                                    .border_1()
-                                    .border_color(ink::rule())
+                                    .w_full()
+                                    // A pane clips its plate: on the first
+                                    // layout pass a column can be measured
+                                    // before the ones beside it, and a figure
+                                    // that briefly thinks it is wider than its
+                                    // column must not paint over it.
+                                    .overflow_hidden()
                                     .child(match preview {
                                         Some(element) => element.into_any_element(),
                                         None => empty_plate("Open FigureStudio from a plate."),

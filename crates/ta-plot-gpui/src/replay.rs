@@ -5,8 +5,8 @@
 //! so what is on screen and what lands in the exported figure cannot drift.
 
 use gpui_kit::{
-    fill, point, px, App, Bounds, Corners, Hsla, Pixels, Point, RenderImage, TextAlign,
-    TextRun, Window,
+    fill, point, px, App, Bounds, Corners, Hsla, Pixels, Point, RenderImage, TextAlign, TextRun,
+    Window,
 };
 use std::sync::Arc;
 use ta_core::Rgba as InkColor;
@@ -19,6 +19,9 @@ pub struct ReplayTransform {
     /// Recorded units to device pixels. One recorded unit is one point in the
     /// exported figure, so this is the panel's density, not a zoom.
     pub scale: f32,
+    /// The plot rectangle, in recorded units. A caption drawn up the margin has
+    /// to know how much room it has.
+    pub plot: (f64, f64, f64, f64),
 }
 
 impl ReplayTransform {
@@ -26,14 +29,34 @@ impl ReplayTransform {
         Self {
             origin,
             scale: scale.max(0.01),
+            plot: (0.0, 0.0, 0.0, 0.0),
         }
     }
 
+    /// The same, told where the plot rectangle is.
+    pub fn with_plot(mut self, plot: (f64, f64, f64, f64)) -> Self {
+        self.plot = plot;
+        self
+    }
+
     fn place(&self, (x, y): (i32, i32)) -> Point<Pixels> {
+        self.map((x as f64, y as f64))
+    }
+
+    /// A point of the recorded figure, in the element's own pixels.
+    ///
+    /// The overlay uses this as well as the buffer, so a cursor sits on the
+    /// curve it was placed on whatever the figure is zoomed to.
+    pub fn map(&self, (x, y): (f64, f64)) -> Point<Pixels> {
         point(
             self.origin.x + px(x as f32 * self.scale),
             self.origin.y + px(y as f32 * self.scale),
         )
+    }
+
+    /// A length of the recorded figure, in the element's own pixels.
+    pub fn length(&self, value: f32) -> Pixels {
+        px(value * self.scale)
     }
 }
 
@@ -261,21 +284,111 @@ fn paint_text(
         return;
     }
 
-    // GPUI shapes text but cannot rotate it, so a vertical caption is drawn
-    // across its anchor instead of down a column of single characters. The
-    // exported SVG rotates the same string, so the words and their place agree
-    // between the two backends.
+    // A caption that is vertical in the figure stays vertical on screen: the
+    // words are handed to the SVG renderer as the same rotated text the export
+    // writes, and painted through its own transformation. GPUI's shaped lines
+    // cannot be turned, but its SVG renderer can turn anything, and it resolves
+    // the same system font.
+    if paint_rotated_svg_text(window, cx, text, font_size, ink, origin, rotation, transform) {
+        return;
+    }
+    // Should the SVG renderer be unavailable, the caption is still set upright
+    // in the margin rather than dropped.
     let line = shape(window, text, font_size, ink);
     let y = match anchor.vertical {
         VAlign::Top => origin.y,
         VAlign::Center => origin.y - font_size / 2.0,
         VAlign::Bottom => origin.y - font_size,
     };
-    let _ = line.paint(origin_at(origin.x, y), font_size, TextAlign::Left, None, window, cx);
+    let x = origin.x - line.width();
+    let _ = line.paint(point(x, y), font_size, TextAlign::Left, None, window, cx);
 }
 
-fn origin_at(x: Pixels, y: Pixels) -> Point<Pixels> {
-    point(x, y)
+/// Paints a caption turned by `rotation` degrees, through the SVG renderer.
+///
+/// Returns whether it was drawn: the caller keeps an upright fallback for the
+/// case where the renderer cannot resolve a font.
+#[allow(clippy::too_many_arguments)]
+fn paint_rotated_svg_text(
+    window: &mut Window,
+    cx: &mut App,
+    text: &str,
+    font_size: Pixels,
+    color: Hsla,
+    origin: Point<Pixels>,
+    rotation: u16,
+    transform: ReplayTransform,
+) -> bool {
+    use gpui_kit::{size, Bounds, SharedString, TransformationMatrix};
+
+    // The line box the text needs, measured by the same shaper the rest of the
+    // frame uses.
+    let measured = shape(window, text, font_size, color);
+    let width = measured.width();
+    let ascent = font_size * 0.8;
+    let descent = font_size * 0.25;
+
+    // The SVG is written the way the exporter writes it: the glyphs laid out
+    // along a baseline that is then turned, so the file and the screen turn the
+    // same string by the same angle.
+    // Which way the text reads: a y axis title climbs the margin, a colour bar
+    // label comes down the page. The angle matches the transform the exporter
+    // writes for the same caption.
+    let angle = match rotation % 360 {
+        90 => 90.0,
+        _ => -90.0,
+    };
+    let box_width = ascent + descent;
+    let box_height = width;
+    // Written with string building rather than a format literal: the SVG has
+    // more quotation marks than a readable format string wants. The text is
+    // centred in its box and the box is centred on the anchor, so where the
+    // caption lands depends on the anchor alone.
+    let centre_x = ascent.as_f32();
+    let centre_y = box_height.as_f32() / 2.0;
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">",
+        w = box_width.as_f32(),
+        h = box_height.as_f32(),
+    ));
+    svg.push_str(&format!(
+        "<text x=\"{x}\" y=\"{y}\" text-anchor=\"middle\" font-family=\"Helvetica\" font-size=\"{size}\" fill=\"#ffffff\" transform=\"rotate({angle} {x} {y})\">{escaped}</text>",
+        x = centre_x,
+        y = centre_y,
+        size = font_size.as_f32(),
+        angle = angle,
+        escaped = escape_svg_text(text),
+    ));
+    svg.push_str("</svg>");
+    // A rotated caption is centred on its anchor in both directions, which is
+    // the same rule the exporter follows.
+    let bounds = Bounds::new(
+        point(
+            origin.x - transform.length(box_width.as_f32()) / 2.0,
+            origin.y - box_height / 2.0,
+        ),
+        size(
+            transform.length(box_width.as_f32()),
+            transform.length(box_height.as_f32()),
+        ),
+    );
+    let key = SharedString::from(format!(
+        "caption:{angle}:{}:{text}",
+        font_size.as_f32().round() as i32
+    ));
+    window
+        .paint_svg(bounds, key, Some(svg.as_bytes()), TransformationMatrix::unit(), color, cx)
+        .is_ok()
+}
+
+/// The five characters an XML document cannot hold as themselves.
+fn escape_svg_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 pub(crate) fn shape(

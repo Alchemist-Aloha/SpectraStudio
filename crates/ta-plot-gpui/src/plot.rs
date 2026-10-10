@@ -363,6 +363,7 @@ pub struct PlotCursor {
 }
 
 /// Everything a plate needs to draw itself.
+#[derive(Clone)]
 pub struct PanelScene {
     pub panel: PanelModel,
     pub style: PublicationStyle,
@@ -377,6 +378,21 @@ pub struct PanelScene {
     pub show_crosshair: bool,
     /// The colour the crosshair and cursors use.
     pub accent: InkColor,
+    /// The physical size of the figure this plate is a preview of, in points.
+    ///
+    /// A working plate draws itself at one point per pixel and treats the
+    /// type sizes as pixels, which is what a screen wants. A *preview* has to
+    /// show the figure as it will be printed: the same layout, zoomed to fit
+    /// the pane, so a change of type size or of figure size is visible as the
+    /// change it will be on paper.
+    pub figure: Option<(f64, f64)>,
+    /// Whether the pointer can move this plate. A figure preview does not pan:
+    /// its limits are the figure's, and the editor sets them.
+    pub interactive: bool,
+    /// The colour of the page a figure is drawn on, when the plate is previewing
+    /// one. The element keeps the shell's ground, so the page and its margins
+    /// are visible as the paper they are.
+    pub page: Option<InkColor>,
 }
 
 /// One computed frame: the layout, the viewport it used, and the commands.
@@ -386,6 +402,11 @@ pub struct PlotFrame {
     pub buffer: CommandBuffer,
     /// The figure size in points, which the recorded frame is in.
     pub points: (f64, f64),
+    /// How many plate pixels one point of the figure takes.
+    pub zoom: f32,
+    /// Where the figure's own origin sits inside the plate, when the figure is
+    /// letterboxed into a pane of a different shape.
+    pub offset: (f32, f32),
     /// The plate's size in device pixels.
     pub size: (f64, f64),
     panel: PanelModel,
@@ -399,6 +420,19 @@ pub struct PlotFrame {
 }
 
 impl PlotFrame {
+    /// How the recorded figure maps into the plate.
+    pub fn transform(&self, bounds: Bounds<Pixels>) -> crate::replay::ReplayTransform {
+        let plot = self.layout.plot;
+        crate::replay::ReplayTransform::new(
+            gpui_kit::point(
+                bounds.origin.x + px(self.offset.0),
+                bounds.origin.y + px(self.offset.1),
+            ),
+            self.zoom,
+        )
+        .with_plot((plot.x0, plot.y0, plot.x1, plot.y1))
+    }
+
     /// Whether this frame still describes the given inputs.
     fn describes(
         &self,
@@ -420,8 +454,11 @@ impl PlotFrame {
     /// The physical coordinate of a window position.
     fn data_at(&self, window_position: Point<Pixels>, origin: Point<Pixels>) -> Option<(f64, f64)> {
         let local = window_position - origin;
-        let x = local.x.as_f32() as f64 - self.layout.plot.x0;
-        let y = local.y.as_f32() as f64 - self.layout.plot.y0;
+        // The pointer is in plate pixels; the layout is in figure points.
+        let x = (local.x.as_f32() - self.offset.0) as f64 / self.zoom.max(0.01) as f64
+            - self.layout.plot.x0;
+        let y = (local.y.as_f32() - self.offset.1) as f64 / self.zoom.max(0.01) as f64
+            - self.layout.plot.y0;
         if !(0.0..=self.layout.plot.width()).contains(&x)
             || !(0.0..=(self.layout.plot.height())).contains(&y)
         {
@@ -445,10 +482,50 @@ fn compute_frame(
     let x_scale = Scale::new(scene.panel.x.scale).unwrap_or(Scale::Linear);
     let y_scale = Scale::new(scene.panel.y.scale).unwrap_or(Scale::Linear);
 
-    // The frame is recorded in figure points, and the plate is drawn at the
-    // same density: one point, one device pixel, so the grid lines land where
-    // the pointer thinks they do.
-    let (width, height) = figure_points(scene, x_scale, y_scale, state, size);
+    // A working plate is recorded at one point per device pixel, so the grid
+    // lines land where the pointer thinks they do. A figure preview is
+    // recorded at the figure's own size in points and then zoomed to fit, type
+    // and all, which is what makes a type size mean something on screen.
+    let (zoom, offset) = match scene.figure {
+        Some((figure_width, figure_height))
+            if figure_width > 1.0 && figure_height > 1.0 =>
+        {
+            let zoom = (size.0 / figure_width)
+                .min(size.1 / figure_height)
+                .clamp(0.05, 8.0);
+            let (drawn_width, drawn_height) = (figure_width * zoom, figure_height * zoom);
+            (
+                zoom as f32,
+                (
+                    ((size.0 - drawn_width) / 2.0).max(0.0) as f32,
+                    ((size.1 - drawn_height) / 2.0).max(0.0) as f32,
+                ),
+            )
+        }
+        _ => (1.0f32, (0.0f32, 0.0f32)),
+    };
+    // A zoomed preview records the same figure with its type, its line widths
+    // and its markers multiplied by the zoom, so the layout it computes is the
+    // layout the printer will use, seen larger.
+    let original = scene;
+    let magnified: PanelScene;
+    let scene: &PanelScene = if (zoom - 1.0).abs() > 1e-6 {
+        magnified = PanelScene {
+            style: ta_plot::export::scaled_style(&original.style, zoom as f64),
+            series: ta_plot::export::scaled_series(&original.series, zoom as f64),
+            ..(*original).clone()
+        };
+        &magnified
+    } else {
+        original
+    };
+    let (width, height) = recorded_size(scene, size, zoom as f64);
+    if std::env::var_os("SPECTRA_TRACE").is_some() {
+        eprintln!(
+            "frame: pane {size:?} figure {:?} zoom {zoom:.4} offset {offset:?} recorded {width:.1}x{height:.1}",
+            scene.figure
+        );
+    }
     let layout = PanelLayout::compute(
         &scene.panel,
         &scene.style,
@@ -554,11 +631,27 @@ fn compute_frame(
         (width.round() as u32, height.round() as u32),
     );
 
+    if std::env::var_os("SPECTRA_TRACE").is_some() {
+        for command in buffer.in_paint_order() {
+            if let ta_plot::commands::DrawCommand::Text {
+                text,
+                position,
+                size,
+                rotation,
+                ..
+            } = command
+            {
+                eprintln!("  text {text:?} at {position:?} size {size} rotation {rotation}");
+            }
+        }
+    }
     PlotFrame {
         layout,
         viewport,
         buffer,
         points: (width, height),
+        zoom,
+        offset,
         size,
         panel: scene.panel.clone(),
         series: scene.series.clone(),
@@ -597,15 +690,17 @@ fn layout_viewport_y(
         .map(|pixel| pixel.1)
 }
 
-/// The recorded width and height: the plate's device size, so the two agree.
-fn figure_points(
-    _scene: &PanelScene,
-    _x_scale: Scale,
-    _y_scale: Scale,
-    _state: &PlotState,
-    size: (f64, f64),
-) -> (f64, f64) {
-    (size.0.max(1.0), size.1.max(1.0))
+/// The size the frame is recorded at: the figure's own size scaled by the zoom
+/// when this plate previews a figure, and the plate's device size otherwise.
+fn recorded_size(scene: &PanelScene, size: (f64, f64), zoom: f64) -> (f64, f64) {
+    match scene.figure {
+        Some((figure_width, figure_height))
+            if figure_width > 1.0 && figure_height > 1.0 =>
+        {
+            ((figure_width * zoom).max(1.0), (figure_height * zoom).max(1.0))
+        }
+        _ => (size.0.max(1.0), size.1.max(1.0)),
+    }
 }
 
 /// The plot element: a plate that draws a frame and reports gestures.
@@ -731,13 +826,22 @@ impl Element for PlotElement {
         {
             let frame = self.frame.borrow();
             if let Some(frame) = frame.as_ref() {
-                let scale = bounds.size.width.as_f32() / frame.points.0 as f32;
-                paint_buffer(
-                    window,
-                    cx,
-                    &frame.buffer,
-                    ReplayTransform::new(bounds.origin, scale),
-                );
+                let transform = frame.transform(bounds);
+                // A preview sits on a page: painting it here means the sheet and
+                // its margins are visible, which is what the figure will be.
+                if let Some(page) = self.scene.page {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            transform.map((0.0, 0.0)),
+                            gpui_kit::size(
+                                transform.length(frame.points.0 as f32),
+                                transform.length(frame.points.1 as f32),
+                            ),
+                        ),
+                        to_hsla(page),
+                    ));
+                }
+                paint_buffer(window, cx, &frame.buffer, transform);
                 // Then the things that move with the pointer: cursors, the
                 // selection rectangle and the crosshair with the coordinates
                 // written into the plate's margin.
@@ -748,20 +852,22 @@ impl Element for PlotElement {
                     frame,
                     &self.scene,
                     &self.state.borrow(),
-                    scale,
+                    transform,
                 );
             }
         }
 
-        register_pointer_handlers(
-            window,
-            bounds,
-            self.hitbox.clone(),
-            self.frame.clone(),
-            self.state.clone(),
-            self.scene.clone(),
-            self.on_gesture.clone(),
-        );
+        if self.scene.interactive {
+            register_pointer_handlers(
+                window,
+                bounds,
+                self.hitbox.clone(),
+                self.frame.clone(),
+                self.state.clone(),
+                self.scene.clone(),
+                self.on_gesture.clone(),
+            );
+        }
     }
 }
 
@@ -774,18 +880,20 @@ fn paint_overlay(
     frame: &PlotFrame,
     scene: &PanelScene,
     state: &PlotState,
-    scale: f32,
+    transform: ReplayTransform,
 ) {
-    use gpui_kit::{hsla, px, PathBuilder};
+    use gpui_kit::{hsla, PathBuilder};
     let plot = frame.layout.plot;
     let accent = scene.accent;
     let ink = to_hsla(accent);
 
-    // A line helper, in plate pixels.
+    // A line helper. The figure's own coordinates are mapped through the same
+    // transform the recorded frame used, so a cursor sits on the curve it was
+    // placed on whatever the figure is zoomed to.
     let line = |window: &mut Window, width: f32, from: (f32, f32), to: (f32, f32)| {
-        let mut builder = PathBuilder::stroke(px(width));
-        builder.move_to(point(bounds.origin.x + px(from.0), bounds.origin.y + px(from.1)));
-        builder.line_to(point(bounds.origin.x + px(to.0), bounds.origin.y + px(to.1)));
+        let mut builder = PathBuilder::stroke(transform.length(width));
+        builder.move_to(transform.map((from.0 as f64, from.1 as f64)));
+        builder.line_to(transform.map((to.0 as f64, to.1 as f64)));
         if let Ok(path) = builder.build() {
             window.paint_path(path, ink);
         }
@@ -802,7 +910,17 @@ fn paint_overlay(
                     let y = plot.y0 + y;
                     if y >= plot.y0 && y <= plot.y1 {
                         line(window, 1.0, (plot.x0 as f32, y as f32), (plot.x1 as f32, y as f32));
-                        paint_margin_label(window, cx, bounds, (plot.x0 as f32 - 4.0, y as f32), &cursor.label, ink, 10.0, true, scale);
+                        paint_margin_label(
+                            window,
+                            cx,
+                            bounds,
+                            (plot.x0 as f32 - 4.0, y as f32),
+                            &cursor.label,
+                            ink,
+                            10.0,
+                            true,
+                            transform,
+                        );
                     }
                 }
             }
@@ -848,27 +966,15 @@ fn paint_overlay(
                 let px_y = plot.y0 + pixel.1;
                 if frame.layout.plot.contains(px_x, px_y) {
                     let ghost = hsla(0.0, 0.0, 0.45, 0.35);
-                    let mut builder = PathBuilder::stroke(px(1.0));
-                    builder.move_to(point(
-                        bounds.origin.x + px(px_x as f32),
-                        bounds.origin.y + px(plot.y0 as f32),
-                    ));
-                    builder.line_to(point(
-                        bounds.origin.x + px(px_x as f32),
-                        bounds.origin.y + px(plot.y1 as f32),
-                    ));
+                    let mut builder = PathBuilder::stroke(transform.length(1.0));
+                    builder.move_to(transform.map((px_x, plot.y0)));
+                    builder.line_to(transform.map((px_x, plot.y1)));
                     if let Ok(path) = builder.build() {
                         window.paint_path(path, ghost);
                     }
-                    let mut builder = PathBuilder::stroke(px(1.0));
-                    builder.move_to(point(
-                        bounds.origin.x + px(plot.x0 as f32),
-                        bounds.origin.y + px(px_y as f32),
-                    ));
-                    builder.line_to(point(
-                        bounds.origin.x + px(plot.x1 as f32),
-                        bounds.origin.y + px(px_y as f32),
-                    ));
+                    let mut builder = PathBuilder::stroke(transform.length(1.0));
+                    builder.move_to(transform.map((plot.x0, px_y)));
+                    builder.line_to(transform.map((plot.x1, px_y)));
                     if let Ok(path) = builder.build() {
                         window.paint_path(path, ghost);
                     }
@@ -883,7 +989,7 @@ fn paint_overlay(
                         ink,
                         10.0,
                         false,
-                        scale,
+                        transform,
                     );
                     paint_margin_label(
                         window,
@@ -894,7 +1000,7 @@ fn paint_overlay(
                         ink,
                         10.0,
                         true,
-                        scale,
+                        transform,
                     );
                 }
             }
@@ -904,32 +1010,30 @@ fn paint_overlay(
 
 /// A short label placed in the plate's margin.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn paint_margin_label(
     window: &mut Window,
     cx: &mut App,
-    bounds: Bounds<Pixels>,
+    _bounds: Bounds<Pixels>,
     at: (f32, f32),
     text: &str,
     color: gpui_kit::Hsla,
     font_size: f32,
     right_aligned: bool,
-    scale: f32,
+    transform: ReplayTransform,
 ) {
     use gpui_kit::{point, px, TextAlign};
-    let line = crate::replay::shape(window, text, px(font_size * scale), color);
+    // A read-out is a screen affordance, not part of the figure, so it keeps
+    // its own size while its place follows the figure.
+    let size = px(font_size);
+    let line = crate::replay::shape(window, text, size, color);
+    let anchor = transform.map((at.0 as f64, at.1 as f64));
     let x = if right_aligned {
-        bounds.origin.x + px(at.0 * scale) - line.width()
+        anchor.x - line.width()
     } else {
-        bounds.origin.x + px(at.0 * scale) - line.width() / 2.0
+        anchor.x - line.width() / 2.0
     };
-    let _ = line.paint(
-        point(x, bounds.origin.y + px(at.1 * scale)),
-        px(font_size * scale),
-        TextAlign::Left,
-        None,
-        window,
-        cx,
-    );
+    let _ = line.paint(point(x, anchor.y), size, TextAlign::Left, None, window, cx);
 }
 
 fn to_hsla(color: InkColor) -> gpui_kit::Hsla {
@@ -1245,6 +1349,230 @@ impl Plate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::HeatmapCache;
+    use ta_core::SeriesStyle;
+
+    /// The sizes the recorded text was drawn at.
+    fn text_sizes(buffer: &ta_plot::CommandBuffer) -> Vec<f64> {
+        buffer
+            .in_paint_order()
+            .into_iter()
+            .filter_map(|command| match command {
+                ta_plot::commands::DrawCommand::Text { size, .. } => Some(*size),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A scene of one line, with the type sizes and figure size a test sets.
+    fn line_scene(style: PublicationStyle, figure: Option<(f64, f64)>) -> (PanelScene, PlotState) {
+        let mut panel = PanelModel::new("");
+        panel.x = ta_core::AxisModel {
+            label: "Delay".into(),
+            unit: Some("ps".into()),
+            range: Some((-1.0, 10.0)),
+            ..ta_core::AxisModel::default()
+        };
+        panel.y = ta_core::AxisModel {
+            label: "ΔOD".into(),
+            range: Some((-0.1, 0.1)),
+            ..ta_core::AxisModel::default()
+        };
+        let points: Vec<(f64, f64)> = (0..40).map(|i| (-1.0 + i as f64 * 0.3, 0.05)).collect();
+        let scene = PanelScene {
+            panel,
+            style,
+            series: vec![PlottedSeries::new("a", points, SeriesStyle::default())],
+            heatmap: None,
+            background: InkColor::rgb(255, 255, 255),
+            cursors: Vec::new(),
+            show_crosshair: false,
+            accent: InkColor::rgb(176, 42, 55),
+            page: figure.map(|_| InkColor::rgb(255, 255, 255)),
+            figure,
+            interactive: true,
+        };
+        let state = PlotState::new((-1.0, 10.0), (-0.1, 0.1));
+        (scene, state)
+    }
+
+    #[test]
+    fn a_figure_preview_draws_its_type_at_the_figures_own_size() {
+        // The defect this catches: the studio drew the working screen's
+        // typography at one point per pixel, so changing the figure's type size
+        // changed nothing on screen and the preview was not the figure.
+        let style = PublicationStyle {
+            base_font_size: 8.0,
+            axis_title_size: 8.0,
+            tick_label_size: 8.0,
+            legend_font_size: 8.0,
+            ..PublicationStyle::default()
+        };
+        let (scene, state) = line_scene(style.clone(), Some((234.0, 180.0)));
+        let cache: SharedHeatmapCache = Rc::new(RefCell::new(HeatmapCache::new()));
+        let frame = compute_frame(&scene, &state, (702.0, 540.0), true, &cache);
+        // 702 / 234 = 3, and 540 / 180 = 3: the whole figure fits at that zoom.
+        assert!((frame.zoom - 3.0).abs() < 1e-6, "zoom was {}", frame.zoom);
+        assert_eq!(frame.offset, (0.0, 0.0));
+        assert!((frame.points.0 - 702.0).abs() < 1e-6);
+        // The recorded type is the figure's type, three times over.
+        let sizes = text_sizes(&frame.buffer);
+        assert!(
+            sizes.iter().any(|size| (size - 8.0 * 3.0).abs() < 1e-6),
+            "no text was drawn at 8 pt of a 3× figure: {sizes:?}"
+        );
+        assert!(
+            frame
+                .buffer
+                .texts()
+                .iter()
+                .any(|text| text.contains("ΔOD") || text.contains("Delay")),
+            "the axis labels are drawn"
+        );
+    }
+
+    #[test]
+    fn the_type_on_screen_is_the_configured_size_at_the_panes_zoom() {
+        // The claim the studio makes: the number in the panel is the number of
+        // points the drawn text is, in the figure's own coordinates, whatever
+        // size that figure is and however big the pane is.
+        let cache: SharedHeatmapCache = Rc::new(RefCell::new(HeatmapCache::new()));
+        let style = |size: f32| PublicationStyle {
+            axis_title_size: size,
+            tick_label_size: size,
+            base_font_size: size,
+            legend_font_size: size,
+            ..PublicationStyle::default()
+        };
+        let mut drawn_ratios = Vec::new();
+        for (figure, configured, pane) in [
+            ((234.0, 180.0), 8.0f32, (702.0, 540.0)),
+            ((504.0, 216.0), 8.0f32, (702.0, 540.0)),
+            ((234.0, 180.0), 12.0f32, (400.0, 900.0)),
+            ((504.0, 216.0), 12.0f32, (1000.0, 1000.0)),
+        ] {
+            let (scene, state) = line_scene(style(configured), Some(figure));
+            let frame = compute_frame(&scene, &state, pane, true, &cache);
+            let biggest = text_sizes(&frame.buffer)
+                .into_iter()
+                .fold(0.0f64, f64::max);
+            // Ignore the panel title, which is drawn at the base size.
+            let ratio = biggest / frame.zoom as f64;
+            drawn_ratios.push(ratio);
+            assert!(
+                (ratio - configured as f64).abs() < 1e-6,
+                "a {configured} pt figure was drawn at {ratio} pt at zoom {}",
+                frame.zoom
+            );
+        }
+        assert_eq!(drawn_ratios.len(), 4);
+    }
+
+    #[test]
+    fn a_bigger_figure_gets_less_zoom_in_the_same_pane() {
+        // Two figures in one pane: the wider one is shown smaller, so the same
+        // pane can preview 3.25-inch and 7-inch figures honestly.
+        let cache: SharedHeatmapCache = Rc::new(RefCell::new(HeatmapCache::new()));
+        let (scene, state) = line_scene(PublicationStyle::default(), Some((234.0, 180.0)));
+        let small = compute_frame(&scene, &state, (702.0, 540.0), true, &cache);
+        let (scene, state) = line_scene(PublicationStyle::default(), Some((504.0, 216.0)));
+        let large = compute_frame(&scene, &state, (702.0, 540.0), true, &cache);
+        assert!(large.zoom < small.zoom);
+        // And the drawn figure fills the pane in the dimension that binds.
+        assert!((504.0 * large.zoom as f64 - 702.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn a_preview_is_letterboxed_rather_than_stretched() {
+        // A 3.25 × 2.5 in figure in a square pane: the figure keeps its shape
+        // and is centred, so what is on screen has the proportions of the paper.
+        let (scene, state) = line_scene(PublicationStyle::default(), Some((234.0, 180.0)));
+        let cache: SharedHeatmapCache = Rc::new(RefCell::new(HeatmapCache::new()));
+        let frame = compute_frame(&scene, &state, (600.0, 600.0), true, &cache);
+        assert!((frame.zoom - 600.0 / 234.0).abs() < 1e-6);
+        let drawn_height = 180.0 * frame.zoom as f64;
+        assert!(
+            (frame.offset.1 as f64 - (600.0 - drawn_height) / 2.0).abs() < 1.0,
+            "the figure is centred vertically"
+        );
+        assert_eq!(frame.offset.0, 0.0);
+    }
+
+    #[test]
+    fn a_preview_layout_is_the_exports_layout_magnified() {
+        // §17.11: the editor preview and the exported file share their layout
+        // definitions. The way to keep that true is to check it: the layout the
+        // preview computes at a pane of `figure × zoom` must be the layout the
+        // export computes at `figure`, scaled by the zoom.
+        let cache: SharedHeatmapCache = Rc::new(RefCell::new(HeatmapCache::new()));
+        let style = PublicationStyle {
+            base_font_size: 8.0,
+            axis_title_size: 8.0,
+            tick_label_size: 8.0,
+            legend_font_size: 8.0,
+            ..PublicationStyle::default()
+        };
+        let figure = (234.0, 180.0);
+        let (scene, state) = line_scene(style.clone(), Some(figure));
+        let zoom = 3.0;
+        let preview = compute_frame(
+            &scene,
+            &state,
+            (figure.0 * zoom, figure.1 * zoom),
+            true,
+            &cache,
+        );
+        // The same panel and style at the figure's own size, which is what
+        // `ta_plot::export` lays out before it writes a file.
+        let x_scale = Scale::Linear;
+        let y_scale = Scale::Linear;
+        let exported = PanelLayout::compute(
+            &scene.panel,
+            &style,
+            x_scale,
+            y_scale,
+            state.x_range,
+            state.y_range,
+            figure,
+        );
+        let plot = preview.layout.plot;
+        let expected = exported.plot;
+        // Every margin is expressed in the type size, so the layout is linear
+        // and this is exact to rounding: the preview *is* the exported figure,
+        // drawn larger.
+        let tolerance = 1.0;
+        for (actual, reference, edge) in [
+            (plot.x0, expected.x0, "left"),
+            (plot.y0, expected.y0, "top"),
+            (plot.x1, expected.x1, "right"),
+            (plot.y1, expected.y1, "bottom"),
+        ] {
+            assert!(
+                (actual - reference * zoom).abs() < tolerance,
+                "the {edge} edge is at {actual}, and the export puts it at {}",
+                reference * zoom
+            );
+        }
+        // The plot's own size agrees to the same order, so the figure's
+        // composition is what the export will have.
+        assert!(
+            ((plot.x1 - plot.x0) - (expected.x1 - expected.x0) * zoom).abs() < tolerance,
+            "the plot is {} wide where the export's is {}",
+            plot.x1 - plot.x0,
+            (expected.x1 - expected.x0) * zoom
+        );
+        assert!((preview.zoom as f64 - zoom).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_working_plate_is_unchanged_by_any_of_this() {
+        let (scene, state) = line_scene(PublicationStyle::default(), None);
+        let cache: SharedHeatmapCache = Rc::new(RefCell::new(HeatmapCache::new()));
+        let frame = compute_frame(&scene, &state, (400.0, 300.0), true, &cache);
+        assert_eq!(frame.zoom, 1.0);
+        assert_eq!(frame.offset, (0.0, 0.0));
+        assert_eq!(frame.points, (400.0, 300.0));
+    }
 
     fn state() -> PlotState {
         PlotState::new((-10.0, 10.0), (-0.5, 0.5))
@@ -1398,6 +1726,9 @@ mod tests {
             cursors: Vec::new(),
             show_crosshair: false,
             accent: InkColor::rgb(0, 0, 0),
+            figure: None,
+            interactive: true,
+            page: None,
         };
         let state = PlotState::new((500.0, 539.0), (0.0, 19.0));
         let cache: SharedHeatmapCache = Rc::new(RefCell::new(HeatmapCache::new()));
