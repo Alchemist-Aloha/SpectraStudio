@@ -222,6 +222,17 @@ impl PlotState {
     }
 }
 
+/// A persistent cursor line: the selected wavelength or delay, drawn over the
+/// frame rather than into it, so moving a selection costs a repaint and not a
+/// full re-render of the contours.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlotCursor {
+    /// Which axis the line stands on.
+    pub axis: ta_core::AxisKind,
+    pub value: f64,
+    pub label: String,
+}
+
 /// Everything a plate needs to draw itself.
 pub struct PanelScene {
     pub panel: PanelModel,
@@ -229,6 +240,12 @@ pub struct PanelScene {
     pub series: Vec<PlottedSeries>,
     pub heatmap: Option<Arc<HeatmapData>>,
     pub background: InkColor,
+    /// Selection cursors, in the accent colour.
+    pub cursors: Vec<PlotCursor>,
+    /// Whether a pointer crosshair with its coordinates in the margin is drawn.
+    pub show_crosshair: bool,
+    /// The colour the crosshair and cursors use.
+    pub accent: InkColor,
 }
 
 /// One computed frame: the layout, the viewport it used, and the commands.
@@ -257,6 +274,8 @@ impl PlotFrame {
         size: (f64, f64),
         show_grid: bool,
     ) -> bool {
+        // Cursors are deliberately absent: they paint over the frame, so moving
+        // a selection does not re-render the contours.
         self.size == size
             && self.x_range == state.x_range
             && self.y_range == state.y_range
@@ -476,6 +495,18 @@ impl Element for PlotElement {
                     &frame.buffer,
                     ReplayTransform::new(bounds.origin, scale),
                 );
+                // Then the things that move with the pointer: cursors, the
+                // selection rectangle and the crosshair with the coordinates
+                // written into the plate's margin.
+                paint_overlay(
+                    window,
+                    cx,
+                    bounds,
+                    frame,
+                    &self.scene,
+                    &self.state.borrow(),
+                    scale,
+                );
             }
         }
 
@@ -489,6 +520,173 @@ impl Element for PlotElement {
             self.on_gesture.clone(),
         );
     }
+}
+
+/// Paints the selection cursors, the rectangle being dragged, and the pointer
+/// crosshair with its coordinates in the margin.
+fn paint_overlay(
+    window: &mut Window,
+    cx: &mut App,
+    bounds: Bounds<Pixels>,
+    frame: &PlotFrame,
+    scene: &PanelScene,
+    state: &PlotState,
+    scale: f32,
+) {
+    use gpui_kit::{hsla, px, PathBuilder};
+    let plot = frame.layout.plot;
+    let accent = scene.accent;
+    let ink = to_hsla(accent);
+
+    // A line helper, in plate pixels.
+    let line = |window: &mut Window, width: f32, from: (f32, f32), to: (f32, f32)| {
+        let mut builder = PathBuilder::stroke(px(width));
+        builder.move_to(point(bounds.origin.x + px(from.0), bounds.origin.y + px(from.1)));
+        builder.line_to(point(bounds.origin.x + px(to.0), bounds.origin.y + px(to.1)));
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, ink);
+        }
+    };
+
+    // The cursors the session holds.
+    for cursor in &scene.cursors {
+        match cursor.axis {
+            ta_core::AxisKind::Delay => {
+                if let Some((_, y)) = frame.viewport.data_to_pixel(
+                    frame.viewport.x_range().0,
+                    cursor.value,
+                ) {
+                    let y = plot.y0 + y;
+                    if y >= plot.y0 && y <= plot.y1 {
+                        line(window, 1.0, (plot.x0 as f32, y as f32), (plot.x1 as f32, y as f32));
+                        paint_margin_label(window, cx, bounds, (plot.x0 as f32 - 4.0, y as f32), &cursor.label, ink, 10.0, true, scale);
+                    }
+                }
+            }
+            _ => {
+                if let Some((x, _)) = frame.viewport.data_to_pixel(
+                    cursor.value,
+                    frame.viewport.y_range().0,
+                ) {
+                    let x = plot.x0 + x;
+                    if x >= plot.x0 && x <= plot.x1 {
+                        line(window, 1.0, (x as f32, plot.y0 as f32), (x as f32, plot.y1 as f32));
+                    }
+                }
+            }
+        }
+    }
+
+    // The rectangle being dragged.
+    if let Some((from, to)) = &state.region {
+        if let (Some(a), Some(b)) = (
+            frame.viewport.data_to_pixel(from.0, from.1),
+            frame.viewport.data_to_pixel(to.0, to.1),
+        ) {
+            let a = (plot.x0 + a.0, plot.y0 + a.1);
+            let b = (plot.x0 + b.0, plot.y0 + b.1);
+            let corners = (
+                (a.0.min(b.0) as f32, a.1.min(b.1) as f32),
+                (a.0.max(b.0) as f32, a.1.max(b.1) as f32),
+            );
+            line(window, 1.0, (corners.0 .0, corners.0 .1), (corners.1 .0, corners.0 .1));
+            line(window, 1.0, (corners.1 .0, corners.0 .1), (corners.1 .0, corners.1 .1));
+            line(window, 1.0, (corners.1 .0, corners.1 .1), (corners.0 .0, corners.1 .1));
+            line(window, 1.0, (corners.0 .0, corners.1 .1), (corners.0 .0, corners.0 .1));
+        }
+    }
+
+    // The pointer: a hairline crosshair and its coordinates written into the
+    // plate's margin, which is where a ruled plate keeps its numbers.
+    if scene.show_crosshair {
+        if let Some((x, y)) = state.hover {
+            if let Some(pixel) = frame.viewport.data_to_pixel(x, y) {
+                let px_x = plot.x0 + pixel.0;
+                let px_y = plot.y0 + pixel.1;
+                if frame.layout.plot.contains(px_x, px_y) {
+                    let ghost = hsla(0.0, 0.0, 0.45, 0.35);
+                    let mut builder = PathBuilder::stroke(px(1.0));
+                    builder.move_to(point(
+                        bounds.origin.x + px(px_x as f32),
+                        bounds.origin.y + px(plot.y0 as f32),
+                    ));
+                    builder.line_to(point(
+                        bounds.origin.x + px(px_x as f32),
+                        bounds.origin.y + px(plot.y1 as f32),
+                    ));
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, ghost);
+                    }
+                    let mut builder = PathBuilder::stroke(px(1.0));
+                    builder.move_to(point(
+                        bounds.origin.x + px(plot.x0 as f32),
+                        bounds.origin.y + px(px_y as f32),
+                    ));
+                    builder.line_to(point(
+                        bounds.origin.x + px(plot.x1 as f32),
+                        bounds.origin.y + px(px_y as f32),
+                    ));
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, ghost);
+                    }
+                    let x_label = format!("{:.4}", x);
+                    let y_label = format!("{:.4}", y);
+                    paint_margin_label(
+                        window,
+                        cx,
+                        bounds,
+                        (px_x as f32, plot.y1 as f32 + 3.0),
+                        &x_label,
+                        ink,
+                        10.0,
+                        false,
+                        scale,
+                    );
+                    paint_margin_label(
+                        window,
+                        cx,
+                        bounds,
+                        (plot.x0 as f32 - 4.0, px_y as f32),
+                        &y_label,
+                        ink,
+                        10.0,
+                        true,
+                        scale,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A short label placed in the plate's margin.
+#[allow(clippy::too_many_arguments)]
+fn paint_margin_label(
+    window: &mut Window,
+    cx: &mut App,
+    bounds: Bounds<Pixels>,
+    at: (f32, f32),
+    text: &str,
+    color: gpui_kit::Hsla,
+    font_size: f32,
+    right_aligned: bool,
+    scale: f32,
+) {
+    use gpui_kit::{point, px, TextAlign};
+    let line = crate::replay::shape(window, text, px(font_size * scale), color);
+    let x = if right_aligned {
+        bounds.origin.x + px(at.0 * scale) - line.width()
+    } else {
+        bounds.origin.x + px(at.0 * scale) - line.width() / 2.0
+    };
+    let _ = line.paint(
+        point(x, bounds.origin.y + px(at.1 * scale)),
+        px(font_size * scale),
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    );
 }
 
 fn to_hsla(color: InkColor) -> gpui_kit::Hsla {

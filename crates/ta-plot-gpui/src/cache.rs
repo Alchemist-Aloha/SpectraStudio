@@ -47,6 +47,32 @@ impl HeatmapData {
     }
 }
 
+/// The key a request would be cached under.
+pub fn request_key(request: &RasterRequest<'_>) -> RasterKey {
+    let boundaries = match request.sampling {
+        ta_plot::RasterSampling::Levels => {
+            band_levels(&request.limits, &request.levels, request.level_count)
+        }
+        _ => Vec::new(),
+    };
+    RasterKey::of(request, request.sampling, &boundaries)
+}
+
+/// Builds the image for a request, for callers that manage the cache key
+/// themselves.
+pub fn build_heatmap(
+    request: &RasterRequest<'_>,
+    background: InkColor,
+) -> Arc<HeatmapData> {
+    let raster = rasterise(request);
+    Arc::new(HeatmapData::from_raster(
+        &raster.pixels,
+        raster.width,
+        raster.height,
+        background,
+    ))
+}
+
 /// Holds the last image and the key that produced it.
 #[derive(Default)]
 pub struct HeatmapCache {
@@ -57,6 +83,22 @@ pub struct HeatmapCache {
 impl HeatmapCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the cache already holds this exact image.
+    pub fn matches(&self, key: &RasterKey) -> bool {
+        self.key.as_ref() == Some(key) && self.data.is_some()
+    }
+
+    /// Stores an image under its key.
+    pub fn store(&mut self, key: RasterKey, data: Arc<HeatmapData>) {
+        self.key = Some(key);
+        self.data = Some(data);
+    }
+
+    /// The image currently held, if any.
+    pub fn current(&self) -> Option<Arc<HeatmapData>> {
+        self.data.clone()
     }
 
     /// The image for this request, rebuilt only when something visible changed.

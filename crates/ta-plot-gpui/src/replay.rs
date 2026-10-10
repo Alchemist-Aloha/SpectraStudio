@@ -229,6 +229,9 @@ fn paint_text(
     rotation: u16,
     transform: ReplayTransform,
 ) {
+    if text.is_empty() {
+        return;
+    }
     let font_size = px(size as f32 * transform.scale);
     let ink = to_hsla(color);
     let origin = transform.place(position);
@@ -251,29 +254,24 @@ fn paint_text(
         return;
     }
 
-    // A stacked vertical caption: GPUI's shaped lines cannot be rotated, so the
-    // characters are laid down the column instead. The exported SVG rotates the
-    // same string, so the words and their place agree between the two backends.
-    let mut characters: Vec<char> = text.chars().collect();
-    if rotation % 360 == 90 {
-        characters.reverse();
-    }
-    let step = font_size * 1.1;
-    let mut y = match anchor.vertical {
+    // GPUI shapes text but cannot rotate it, so a vertical caption is drawn
+    // across its anchor instead of down a column of single characters. The
+    // exported SVG rotates the same string, so the words and their place agree
+    // between the two backends.
+    let line = shape(window, text, font_size, ink);
+    let y = match anchor.vertical {
         VAlign::Top => origin.y,
-        VAlign::Center => origin.y - step * characters.len() as f32 / 2.0,
-        VAlign::Bottom => origin.y - step * characters.len() as f32,
+        VAlign::Center => origin.y - font_size / 2.0,
+        VAlign::Bottom => origin.y - font_size,
     };
-    for character in characters {
-        let glyph = character.to_string();
-        let line = shape(window, &glyph, font_size, ink);
-        let x = origin.x - line.width() / 2.0;
-        let _ = line.paint(point(x, y), font_size, TextAlign::Left, None, window, cx);
-        y += step;
-    }
+    let _ = line.paint(origin_at(origin.x, y), font_size, TextAlign::Left, None, window, cx);
 }
 
-fn shape(
+fn origin_at(x: Pixels, y: Pixels) -> Point<Pixels> {
+    point(x, y)
+}
+
+pub(crate) fn shape(
     window: &mut Window,
     text: &str,
     font_size: Pixels,

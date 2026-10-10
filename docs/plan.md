@@ -34,9 +34,9 @@ that spine, or replaces a placeholder with the real engine.
 |---|---|---|
 | M0 | Workspace and toolchain | **done** — nine crates, `cargo test --workspace` green, no crate needs GPUI to be tested |
 | M1 | Data layer and persistence | **done** — NIR800 imports and matches numpy; projects round-trip with bit-identical matrices; the version graph prunes what it removes |
-| M2 | Interactive plotting engine | **partly done** — scales, viewport, contours, raster, ticks, Plotters rendering, SVG/PNG export and the recording backend are in and tested (194 tests). Still to do: the `ta-plot-gpui` element that replays a recorded frame through GPUI and turns pointer input into viewport changes |
-| M3 | Application shell, explorer, linked views | not started — this is the end of the MVP |
-| M4 | Processing | background subtraction, crop and averaging are in `ta-processing` and tested; time-zero, reference subtraction, photodegradation and stitching remain |
+| M2 | Interactive plotting engine | **done** — scales, viewport, contours, raster, ticks, Plotters rendering, SVG/PNG export, the recording backend and the `ta-plot-gpui` plate that replays a frame and turns pointer input into viewport changes |
+| M3 | Application shell, explorer, linked views | **built, not finished** — the shell runs the direction the brief records: header of rules, plate index, the captioned figure block, the caption-and-control column, the footer address. Linking, extraction modes, version switching and project persistence are in and tested (233 tests). Still owed: the finish review and DESIGN.md, the dock layout with persisted panel sizes, keyboard shortcuts, and the resizable-column splitter behaviour at small sizes |
+| M4 | Processing | background subtraction, crop and averaging are in `ta-processing` and tested; the workbench that drives them, time-zero (manual and automatic), reference subtraction, photodegradation and stitching remain |
 | M5–M9 | Fitting, comparison, FigureStudio, Glotaran, release | not started |
 
 ## Third deliberate deviation: filled contour levels
