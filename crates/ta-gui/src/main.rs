@@ -21,10 +21,11 @@ use gpui_kit::*;
 
 fn main() {
     // Arguments: paths to open, then `--layout <figure|compare|studio|fit>`,
-    // `--plate <a|b|c|d>` and `--fit`. The flags exist so a layout can be
-    // opened directly by a script: driving a native window with a synthetic
-    // pointer is not possible on every display server, and a screenshot check
-    // that cannot reach a layout checks nothing.
+    // `--plate <a|b|c|d>`, `--fit`, `--export`, `--figure <single|double>` and
+    // `--zoom <percent>`. The flags exist so a state can be reached directly by
+    // a script: driving a native window with a synthetic pointer is not possible
+    // on every display server, and a screenshot check that cannot reach a state
+    // checks nothing.
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let mut layout = app::Layout::Figure;
     // `--export` writes the figure and its numbers beside the input and then
@@ -33,6 +34,7 @@ fn main() {
     let mut fit = false;
     let mut export = false;
     let mut figure_preset: Option<ta_core::JournalPreset> = None;
+    let mut page_zoom: Option<f32> = None;
     let mut initial: Vec<String> = Vec::new();
     let mut index = 0;
     while index < arguments.len() {
@@ -66,6 +68,13 @@ fn main() {
             "--export" => {
                 export = true;
                 index += 1;
+            }
+            "--zoom" => {
+                page_zoom = arguments
+                    .get(index + 1)
+                    .and_then(|value| value.parse::<f32>().ok())
+                    .map(|percent| percent / 100.0);
+                index += 2;
             }
             "--figure" => {
                 figure_preset = match arguments.get(index + 1).map(String::as_str) {
@@ -125,6 +134,16 @@ fn main() {
                 }
                 if layout == app::Layout::Compare {
                     workspace.seed_comparison();
+                }
+                if let Some(zoom) = page_zoom {
+                    // A scripted check of the page zoom, which is otherwise one
+                    // wheel notch or one button away.
+                    if workspace.session.studio.is_none() {
+                        workspace.open_studio(plate);
+                    }
+                    workspace.layout = app::Layout::Studio;
+                    workspace.pending_page_zoom = Some(zoom);
+                    workspace.touch();
                 }
                 if export {
                     // A scripted check of the export path: the same actions the

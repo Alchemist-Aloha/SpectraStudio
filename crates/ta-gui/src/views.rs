@@ -333,7 +333,8 @@ impl Workspace {
                             .flex()
                             .flex_col()
                             .bg(ink::ground())
-                            .p_6()
+                            .p_3()
+                            .child(self.preview_zoom_bar(cx))
                             .child(
                                 div()
                                     .flex_1()

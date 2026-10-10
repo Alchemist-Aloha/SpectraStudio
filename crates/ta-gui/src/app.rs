@@ -203,6 +203,9 @@ pub struct Workspace {
     /// Whether the workbench shows the columns a fit is set up with, or only
     /// the values it produced.
     pub fit_edit_parameters: bool,
+    /// A page zoom to apply to the studio preview once its plate exists, which
+    /// is set by the command line for a scripted check of the preview.
+    pub pending_page_zoom: Option<f32>,
     /// What the title bar currently says, so it is only set when it changes.
     window_title: String,
     /// Whether this dataset has a time-zero correction to show. The fourth
@@ -238,6 +241,7 @@ impl Workspace {
             studio_plates: Vec::new(),
             studio_visible_only: true,
             fit_edit_parameters: true,
+            pending_page_zoom: None,
             window_title: String::new(),
             show_time_zero: false,
             show_time_zero_plate: false,
@@ -364,6 +368,11 @@ impl Workspace {
                     Some(size),
                 );
                 sync_plate(&mut self.studio_plates, 0, scene, raster.clone(), true);
+                if let Some(zoom) = self.pending_page_zoom.take() {
+                    if let Some(plate) = self.studio_plates.first() {
+                        plate.state.borrow_mut().image_zoom = zoom;
+                    }
+                }
             }
             _ => self.studio_plates.clear(),
         }
@@ -1940,6 +1949,7 @@ fn scene_at_size(
         page: figure.map(|_| Rgba::rgb(255, 255, 255)),
         figure,
         interactive: figure.is_none(),
+        image_view: figure.is_some(),
     }
 }
 

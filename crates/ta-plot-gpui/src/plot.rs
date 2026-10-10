@@ -103,6 +103,17 @@ pub struct PlotState {
     pub home: ((f64, f64), (f64, f64)),
     /// Whether the coordinate grid is ruled.
     pub show_grid: bool,
+    /// How much larger than "fit to the pane" a figure preview is drawn.
+    ///
+    /// This is the *page* zoom: it moves the whole sheet, its axes and its
+    /// text, and leaves the data window exactly as the figure sets it. A
+    /// working plate never changes it.
+    pub image_zoom: f32,
+    /// Where the zoomed page has been dragged to, in plate pixels.
+    pub image_offset: (f32, f32),
+    /// The pane this plate was last laid out in, so a zoom from a button can
+    /// hold the pane's centre still the way the wheel holds the pointer.
+    pub last_pane: Option<(f64, f64)>,
 }
 
 impl PlotState {
@@ -117,6 +128,9 @@ impl PlotState {
             drag: DragState::Idle,
             home: (x_range, y_range),
             show_grid: true,
+            image_zoom: 1.0,
+            image_offset: (0.0, 0.0),
+            last_pane: None,
         }
     }
 
@@ -131,6 +145,46 @@ impl PlotState {
         self.x_range = self.home.0;
         self.y_range = self.home.1;
         self.region = None;
+        // A preview goes back to the whole page, which is what "reset" should
+        // mean for a sheet of paper too.
+        self.image_zoom = 1.0;
+        self.image_offset = (0.0, 0.0);
+    }
+
+    /// Scales a figure preview about a point of the pane, so the paper under
+    /// the pointer stays under it.
+    ///
+    /// `magnification` is what the page is multiplied by: more than one makes
+    /// the sheet bigger, which is what a wheel notch up means everywhere else in
+    /// the application.
+    pub fn zoom_image_at(&mut self, anchor: (f64, f64), magnification: f32, pane: (f64, f64)) {
+        if magnification <= 0.0 || !magnification.is_finite() {
+            return;
+        }
+        let before = self.image_zoom;
+        self.image_zoom = (self.image_zoom * magnification).clamp(0.2, 8.0);
+        let applied = if before > 0.0 { self.image_zoom / before } else { 1.0 };
+        // The page's centre sits at the pane's centre offset by the drag; keep
+        // the point under the pointer where it was by moving that offset.
+        let centre = (pane.0 / 2.0, pane.1 / 2.0);
+        let from_centre = (
+            anchor.0 as f32 - centre.0 as f32,
+            anchor.1 as f32 - centre.1 as f32,
+        );
+        self.image_offset = (
+            (self.image_offset.0 + from_centre.0) * applied - from_centre.0,
+            (self.image_offset.1 + from_centre.1) * applied - from_centre.1,
+        );
+    }
+
+    /// Drags a figure preview, which moves the paper rather than the data.
+    pub fn pan_image(&mut self, dx: f32, dy: f32) {
+        self.image_offset = (self.image_offset.0 + dx, self.image_offset.1 + dy);
+    }
+
+    /// The page zoom a preview is showing, as a percentage of "fit".
+    pub fn image_zoom_percent(&self) -> f32 {
+        self.image_zoom * 100.0
     }
 
     fn viewport(&self, x_scale: Scale, y_scale: Scale, pixels: (f64, f64)) -> PlotViewport {
@@ -386,9 +440,13 @@ pub struct PanelScene {
     /// the pane, so a change of type size or of figure size is visible as the
     /// change it will be on paper.
     pub figure: Option<(f64, f64)>,
-    /// Whether the pointer can move this plate. A figure preview does not pan:
-    /// its limits are the figure's, and the editor sets them.
+    /// Whether the pointer can move the *data* window: pan, data zoom, region
+    /// selection, crosshair. A figure preview does not — its limits are the
+    /// figure's, and the editor sets them.
     pub interactive: bool,
+    /// Whether the pointer can move the *page*: the wheel zooms the sheet and a
+    /// drag slides it. This is what a figure preview is for.
+    pub image_view: bool,
     /// The colour of the page a figure is drawn on, when the plate is previewing
     /// one. The element keeps the shell's ground, so the page and its margins
     /// are visible as the paper they are.
@@ -407,6 +465,10 @@ pub struct PlotFrame {
     /// Where the figure's own origin sits inside the plate, when the figure is
     /// letterboxed into a pane of a different shape.
     pub offset: (f32, f32),
+    /// The page zoom and drag this frame was drawn at, so a wheel notch or a
+    /// drag of the sheet recomputes it.
+    image_zoom: f32,
+    image_offset: (f32, f32),
     /// The plate's size in device pixels.
     pub size: (f64, f64),
     panel: PanelModel,
@@ -447,6 +509,10 @@ impl PlotFrame {
             && self.x_range == state.x_range
             && self.y_range == state.y_range
             && self.show_grid == show_grid
+            // The page itself moves too, so a wheel notch or a drag of the
+            // sheet has to invalidate the frame it was drawn from.
+            && self.image_zoom == state.image_zoom
+            && self.image_offset == state.image_offset
             && self.panel == scene.panel
             && self.series == scene.series
     }
@@ -490,15 +556,17 @@ fn compute_frame(
         Some((figure_width, figure_height))
             if figure_width > 1.0 && figure_height > 1.0 =>
         {
-            let zoom = (size.0 / figure_width)
-                .min(size.1 / figure_height)
-                .clamp(0.05, 8.0);
+            // The fit scale shows the whole page; the page zoom on top of it is
+            // the researcher's, and a zoomed page is allowed to run past the
+            // pane — the pane clips it, and the offset slides it.
+            let fit = (size.0 / figure_width).min(size.1 / figure_height);
+            let zoom = (fit * state.image_zoom as f64).clamp(0.02, 40.0);
             let (drawn_width, drawn_height) = (figure_width * zoom, figure_height * zoom);
             (
                 zoom as f32,
                 (
-                    ((size.0 - drawn_width) / 2.0).max(0.0) as f32,
-                    ((size.1 - drawn_height) / 2.0).max(0.0) as f32,
+                    ((size.0 - drawn_width) / 2.0) as f32 + state.image_offset.0,
+                    ((size.1 - drawn_height) / 2.0) as f32 + state.image_offset.1,
                 ),
             )
         }
@@ -652,6 +720,8 @@ fn compute_frame(
         points: (width, height),
         zoom,
         offset,
+        image_zoom: state.image_zoom,
+        image_offset: state.image_offset,
         size,
         panel: scene.panel.clone(),
         series: scene.series.clone(),
@@ -787,6 +857,7 @@ impl Element for PlotElement {
             bounds.size.width.as_f32() as f64,
             bounds.size.height.as_f32() as f64,
         );
+        self.state.borrow_mut().last_pane = Some(size);
         let show_grid = self.state.borrow().show_grid;
         let stale = {
             let frame = self.frame.borrow();
@@ -857,7 +928,10 @@ impl Element for PlotElement {
             }
         }
 
-        if self.scene.interactive {
+        if self.scene.image_view {
+            // A preview: the wheel and the drag move the paper.
+            register_page_handlers(window, bounds, self.hitbox.clone(), self.state.clone());
+        } else if self.scene.interactive {
             register_pointer_handlers(
                 window,
                 bounds,
@@ -1046,6 +1120,100 @@ fn to_hsla(color: InkColor) -> gpui_kit::Hsla {
     let mut value: gpui_kit::Hsla = rgba.into();
     value.a = color.a as f32 / 255.0;
     value
+}
+
+/// Registers the two things a figure preview answers to: the wheel zooms the
+/// page, and a drag slides it. The data window is not touched, so a preview
+/// cannot be panned off the limits the figure sets.
+fn register_page_handlers(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    hitbox: Rc<RefCell<Option<Hitbox>>>,
+    state_handle: Rc<RefCell<PlotState>>,
+) {
+    {
+        let hitbox = hitbox.clone();
+        let state_handle = state_handle.clone();
+        let pane = (
+            bounds.size.width.as_f32() as f64,
+            bounds.size.height.as_f32() as f64,
+        );
+        window.on_mouse_event(
+            move |event: &ScrollWheelEvent, _: DispatchPhase, window: &mut Window, _: &mut App| {
+                let hovered = hitbox
+                    .borrow()
+                    .as_ref()
+                    .map(|hitbox| hitbox.is_hovered(window))
+                    .unwrap_or(false);
+                if !hovered {
+                    return;
+                }
+                let steps = match event.delta {
+                    ScrollDelta::Lines(delta) => delta.y as f64,
+                    ScrollDelta::Pixels(delta) => delta.y.as_f32() as f64 / 40.0,
+                };
+                if steps == 0.0 {
+                    return;
+                }
+                // A notch is about a twentieth; scrolling up makes the page
+                // bigger, which is what scrolling up means everywhere else.
+                let magnification = 1.05f64.powf(steps) as f32;
+                let anchor = (
+                    event.position.x.as_f32() as f64 - bounds.origin.x.as_f32() as f64,
+                    event.position.y.as_f32() as f64 - bounds.origin.y.as_f32() as f64,
+                );
+                state_handle
+                    .borrow_mut()
+                    .zoom_image_at(anchor, magnification, pane);
+                window.refresh();
+            },
+        );
+    }
+    {
+        let hitbox = hitbox.clone();
+        let state_handle = state_handle.clone();
+        let dragging = Rc::new(std::cell::Cell::new(false));
+        let last = Rc::new(std::cell::Cell::new((0.0f32, 0.0f32)));
+        let dragging_down = dragging.clone();
+        let dragging_move = dragging.clone();
+        let last_down = last.clone();
+        let last_move = last.clone();
+        window.on_mouse_event(
+            move |event: &MouseDownEvent, _: DispatchPhase, window: &mut Window, _: &mut App| {
+                if event.button != MouseButton::Left {
+                    return;
+                }
+                let hovered = hitbox
+                    .borrow()
+                    .as_ref()
+                    .map(|hitbox| hitbox.is_hovered(window))
+                    .unwrap_or(false);
+                if !hovered {
+                    return;
+                }
+                dragging_down.set(true);
+                last_down.set((event.position.x.as_f32(), event.position.y.as_f32()));
+            },
+        );
+        window.on_mouse_event(
+            move |event: &MouseMoveEvent, _: DispatchPhase, _: &mut Window, _: &mut App| {
+                if !dragging_move.get() || event.pressed_button != Some(MouseButton::Left) {
+                    return;
+                }
+                let (x, y) = (event.position.x.as_f32(), event.position.y.as_f32());
+                let (was_x, was_y) = last_move.get();
+                last_move.set((x, y));
+                state_handle
+                    .borrow_mut()
+                    .pan_image(x - was_x, y - was_y);
+            },
+        );
+        window.on_mouse_event(
+            move |_: &MouseUpEvent, _: DispatchPhase, _: &mut Window, _: &mut App| {
+                dragging.set(false);
+            },
+        );
+    }
 }
 
 /// Registers hover, press, release and wheel handling against the layout that
@@ -1391,6 +1559,7 @@ mod tests {
             page: figure.map(|_| InkColor::rgb(255, 255, 255)),
             figure,
             interactive: true,
+            image_view: false,
         };
         let state = PlotState::new((-1.0, 10.0), (-0.1, 0.1));
         (scene, state)
@@ -1565,6 +1734,83 @@ mod tests {
     }
 
     #[test]
+    fn the_page_zooms_without_moving_the_data_window() {
+        // The complaint this answers: the wheel over a figure preview changed
+        // the region of interest — the axis limits — instead of the size of the
+        // sheet. A preview zooms the page and leaves the limits alone.
+        let cache: SharedHeatmapCache = Rc::new(RefCell::new(HeatmapCache::new()));
+        let (scene, mut state) = line_scene(PublicationStyle::default(), Some((234.0, 180.0)));
+        let pane = (702.0, 540.0);
+        let fitted = compute_frame(&scene, &state, pane, true, &cache);
+        assert!((fitted.zoom - 3.0).abs() < 1e-6);
+
+        // One wheel notch up, with the pointer at a quarter of the pane.
+        let anchor = (pane.0 * 0.25, pane.1 * 0.5);
+        state.zoom_image_at(anchor, 1.2, pane);
+        assert!(state.image_zoom > 1.0, "the page grew");
+        assert_eq!(state.x_range, (-1.0, 10.0), "the data window did not move");
+        assert_eq!(state.y_range, (-0.1, 0.1));
+
+        let zoomed = compute_frame(&scene, &state, pane, true, &cache);
+        assert!(
+            zoomed.zoom > fitted.zoom,
+            "the page is drawn larger: {} against {}",
+            zoomed.zoom,
+            fitted.zoom
+        );
+        // The layout is the same figure: the page grew, not the plot's share of
+        // the window.
+        assert!(
+            ((zoomed.layout.plot.x1 - zoomed.layout.plot.x0)
+                - (fitted.layout.plot.x1 - fitted.layout.plot.x0) * 1.0)
+                .abs()
+                < 220.0
+        );
+        // The point under the pointer stayed put.
+        let before = fitted
+            .transform(Bounds::new(
+                gpui_kit::point(px(0.0), px(0.0)),
+                gpui_kit::size(px(pane.0 as f32), px(pane.1 as f32)),
+            ))
+            .map((anchor.0, anchor.1));
+        let after = zoomed
+            .transform(Bounds::new(
+                gpui_kit::point(px(0.0), px(0.0)),
+                gpui_kit::size(px(pane.0 as f32), px(pane.1 as f32)),
+            ))
+            .map((anchor.0, anchor.1));
+        assert!((before.x.as_f32() - after.x.as_f32()).abs() < 1.0);
+        let _ = before.y;
+    }
+
+    #[test]
+    fn fitting_the_page_puts_it_back_and_resetting_does_too() {
+        let (scene, mut state) = line_scene(PublicationStyle::default(), Some((234.0, 180.0)));
+        let cache: SharedHeatmapCache = Rc::new(RefCell::new(HeatmapCache::new()));
+        let pane = (600.0, 400.0);
+        let fitted = compute_frame(&scene, &state, pane, true, &cache);
+        state.zoom_image_at((300.0, 200.0), 2.0, pane);
+        state.pan_image(30.0, -20.0);
+        assert!(state.image_zoom > 1.0);
+        assert_ne!(state.image_offset, (0.0, 0.0));
+
+        // "Fit" is the page at 100%, which is what the frame draws at the fit
+        // scale.
+        state.image_zoom = 1.0;
+        state.image_offset = (0.0, 0.0);
+        let again = compute_frame(&scene, &state, pane, true, &cache);
+        assert_eq!(again.zoom, fitted.zoom);
+        assert_eq!(again.offset, fitted.offset);
+
+        // And a full reset does the same, because the page is part of the view.
+        state.zoom_image_at((300.0, 200.0), 2.0, pane);
+        state.reset_view();
+        assert_eq!(state.image_zoom, 1.0);
+        assert_eq!(state.image_offset, (0.0, 0.0));
+        assert!(state.image_zoom_percent() == 100.0);
+    }
+
+    #[test]
     fn a_working_plate_is_unchanged_by_any_of_this() {
         let (scene, state) = line_scene(PublicationStyle::default(), None);
         let cache: SharedHeatmapCache = Rc::new(RefCell::new(HeatmapCache::new()));
@@ -1728,6 +1974,7 @@ mod tests {
             accent: InkColor::rgb(0, 0, 0),
             figure: None,
             interactive: true,
+            image_view: false,
             page: None,
         };
         let state = PlotState::new((500.0, 539.0), (0.0, 19.0));

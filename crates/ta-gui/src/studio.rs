@@ -9,7 +9,7 @@
 use crate::app::{ink, Workspace};
 use crate::plates::{self, PlateContent};
 use crate::widgets::{self, FieldId};
-use gpui_kit::{div, px, IntoElement, Styled};
+use gpui_kit::{div, px, AnyElement, Context, ElementId, IntoElement, ParentElement, Styled};
 use std::path::PathBuf;
 use ta_core::{
     AnnotationKind, AnnotationSpec, AxisScale, DashPattern, ExportFormat, FigureModel,
@@ -429,6 +429,76 @@ impl Workspace {
             content.series = fresh.series;
         }
         Some(content)
+    }
+
+    /// The page controls above the preview: zoom out, the percentage, zoom in,
+    /// and back to the whole sheet. The wheel does the same thing under the
+    /// pointer; the buttons are for a hand that has not found the wheel, and for
+    /// a number a user can read.
+    pub fn preview_zoom_bar(&self, cx: &mut Context<Workspace>) -> AnyElement {
+        let zoom = self
+            .studio_plates
+            .first()
+            .map(|plate| plate.state.borrow().image_zoom_percent())
+            .unwrap_or(100.0);
+        let fitted = (zoom - 100.0).abs() < 0.5;
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .pb_2()
+            .child(widgets::small_caps("page"))
+            .child(widgets::action_id(
+                "−  Zoom out",
+                ElementId::Name("preview-zoom-out".into()),
+                false,
+                cx,
+                |workspace, _, _| workspace.zoom_preview(1.2),
+            ))
+            .child(widgets::action_id(
+                "+  Zoom in",
+                ElementId::Name("preview-zoom-in".into()),
+                false,
+                cx,
+                |workspace, _, _| workspace.zoom_preview(1.0 / 1.2),
+            ))
+            .child(widgets::action_id(
+                "Fit to pane",
+                ElementId::Name("preview-fit".into()),
+                fitted,
+                cx,
+                |workspace, _, _| workspace.fit_preview(),
+            ))
+            .child(widgets::readout(if fitted {
+                format!("{zoom:.0}% — the whole page")
+            } else {
+                format!("{zoom:.0}% of fit")
+            }))
+            .into_any_element()
+    }
+
+    /// Scales the studio preview's page about the pane's centre, the way the
+    /// wheel scales it about the pointer.
+    pub fn zoom_preview(&mut self, factor: f32) {
+        if let Some(plate) = self.studio_plates.first() {
+            let pane = plate.state.borrow().last_pane.unwrap_or((400.0, 400.0));
+            plate
+                .state
+                .borrow_mut()
+                .zoom_image_at((pane.0 / 2.0, pane.1 / 2.0), factor, pane);
+        }
+        self.touch();
+    }
+
+    /// Puts the preview back on the whole page.
+    pub fn fit_preview(&mut self) {
+        if let Some(plate) = self.studio_plates.first() {
+            let mut state = plate.state.borrow_mut();
+            state.image_zoom = 1.0;
+            state.image_offset = (0.0, 0.0);
+        }
+        self.session.status.info("the page is fitted to the pane again");
+        self.touch();
     }
 
     /// The studio's export actions: the figure, and its numbers.
