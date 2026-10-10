@@ -147,6 +147,29 @@ pub fn contour_content(session: &Session, spec: &ContourSpec) -> PlateContent {
     }
 }
 
+/// The delay a curve's legend shows, in the convention the reference
+/// implementation uses: one decimal below ten picoseconds and none above it, so
+/// a plate of seventeen spectra reads instead of blurring into long numbers.
+pub fn delay_label(value: f64) -> String {
+    if !value.is_finite() {
+        return "—".to_string();
+    }
+    if value.abs() < 10.0 {
+        format!("{value:.1} ps")
+    } else {
+        format!("{value:.0} ps")
+    }
+}
+
+/// The wavelength a curve's legend shows: two decimals, which is the resolution
+/// a spectrometer actually resolves.
+pub fn wavelength_label(value: f64) -> String {
+    if !value.is_finite() {
+        return "—".to_string();
+    }
+    format!("{value:.2} nm")
+}
+
 /// (b) kinetics: the kept comparison curves and the linked trace.
 pub fn kinetics_content(session: &Session) -> PlateContent {
     let mut panel = PanelModel::new("");
@@ -156,6 +179,7 @@ pub fn kinetics_content(session: &Session) -> PlateContent {
     let records = session.kinetics_records();
     let mut series = Vec::new();
     let mut bounds: Option<(f64, f64)> = None;
+    let kept = traces.len().saturating_sub(1);
     for (index, trace) in traces.iter().enumerate() {
         if index + 1 == traces.len() {
             panel.x.range = Some((trace.delay[0], trace.delay[trace.len() - 1]));
@@ -167,12 +191,12 @@ pub fn kinetics_content(session: &Session) -> PlateContent {
             .zip(trace.signal.iter().copied())
             .filter(|(x, y)| x.is_finite() && y.is_finite())
             .collect();
-        // The comparison curves are dashed and cool; the linked trace is the
-        // accented one.
+        // The kept curves run up the wavelength axis; the linked trace is the
+        // accented one, drawn last so it is never hidden by a neighbour.
         let style = if index + 1 == traces.len() {
             line_style(accent(), 1.5)
         } else {
-            dashed(line_style(cool(), 1.0))
+            line_style(ramp(index, kept), 1.0)
         };
         for (_, y) in &points {
             bounds = Some(match bounds {
@@ -181,13 +205,27 @@ pub fn kinetics_content(session: &Session) -> PlateContent {
             });
         }
         series.push(
-            PlottedSeries::new(format!("{:.2}", trace.sampled.coordinate), points, style)
+            PlottedSeries::new(wavelength_label(trace.sampled.coordinate), points, style)
                 .with_kind(SeriesKind::Line),
         );
     }
     if let Some((low, high)) = bounds {
         let pad = ((high - low).abs() * 0.08).max(1e-4);
         panel.y.range = Some((low - pad, high + pad));
+    }
+    // An empty plate is framed at the scale of the matrix it would show, rather
+    // than at a unit box: the axis then says something about this sample even
+    // before a wavelength is chosen.
+    if series.is_empty() {
+        panel.legend.visible = false;
+        // A kinetics plate reads delay along x, so it frames delay against the
+        // signal's own scale rather than wavelength against delay.
+        if let (Some(dataset), Some(version)) = (session.dataset(), session.version_id()) {
+            if let Ok((_, delay)) = dataset.axes(version) {
+                panel.x.range = Some(delay.range());
+                panel.y.range = Some((-1.0, 1.0));
+            }
+        }
     }
     PlateContent {
         panel,
@@ -205,6 +243,7 @@ pub fn spectra_content(session: &Session) -> PlateContent {
     let records = session.spectra_records();
     let mut series = Vec::new();
     let mut bounds: Option<(f64, f64)> = None;
+    let kept = spectra.len().saturating_sub(1);
     for (index, spectrum) in spectra.iter().enumerate() {
         if index == 0 {
             panel.x.range = Some((spectrum.wavelength[0], spectrum.wavelength[spectrum.len() - 1]));
@@ -216,10 +255,11 @@ pub fn spectra_content(session: &Session) -> PlateContent {
             .zip(spectrum.signal.iter().copied())
             .filter(|(x, y)| x.is_finite() && y.is_finite())
             .collect();
+        // The kept spectra climb the delay axis; the linked one is accented.
         let style = if index + 1 == spectra.len() {
             line_style(accent(), 1.5)
         } else {
-            dashed(line_style(cool(), 1.0))
+            line_style(ramp(index, kept), 1.0)
         };
         for (_, y) in &points {
             bounds = Some(match bounds {
@@ -227,11 +267,22 @@ pub fn spectra_content(session: &Session) -> PlateContent {
                 Some((low, high)) => (low.min(*y), high.max(*y)),
             });
         }
-        series.push(PlottedSeries::new(&spectrum.label, points, style));
+        series.push(PlottedSeries::new(
+            delay_label(spectrum.sampled.coordinate),
+            points,
+            style,
+        ));
     }
     if let Some((low, high)) = bounds {
         let pad = ((high - low).abs() * 0.08).max(1e-4);
         panel.y.range = Some((low - pad, high + pad));
+    }
+    if series.is_empty() {
+        panel.legend.visible = false;
+        frame_from_axes(session, &mut panel, true);
+    } else if series.len() > 8 {
+        // Seventeen legend entries at nine points do not fit a plate this size.
+        panel.legend.font_size = 7.5;
     }
     PlateContent {
         panel,
@@ -322,6 +373,24 @@ pub fn content(session: &Session, plate: PlateId, spec: &ContourSpec) -> PlateCo
     }
 }
 
+/// The colour of the `index`-th curve of `count`, in the order the plate draws
+/// them.
+///
+/// A run of curves is read as a sequence along the axis they were taken on, so
+/// the colour runs with that axis rather than being arbitrary: the first is
+/// dark and the last light, and every one of them is named in the legend. The
+/// diverging pair stays reserved for the sign of the signal, which is what the
+/// contour uses it for.
+pub fn ramp(index: usize, count: usize) -> Rgba {
+    let steps = count.max(2);
+    let t = (index as f32 + 0.5) / steps as f32;
+    let colormap = Colormap::preset("viridis").unwrap_or_else(|| {
+        Colormap::preset("coolwarm").expect("a built-in preset exists")
+    });
+    // The ends of the map are kept off: pure yellow is invisible on paper.
+    colormap.sample(0.06 + t * 0.88)
+}
+
 pub fn axis(label: &str, unit: Option<&str>, scale: AxisScale) -> AxisModel {
     AxisModel {
         label: label.to_string(),
@@ -338,9 +407,27 @@ pub fn axis(label: &str, unit: Option<&str>, scale: AxisScale) -> AxisModel {
     }
 }
 
-fn dashed(mut style: SeriesStyle) -> SeriesStyle {
-    style.dash = DashPattern::Dashed;
-    style
+/// Frames an empty plate at the axes of the matrix it is showing.
+///
+/// `horizontal` says which of the matrix's axes the plate puts on x, because a
+/// kinetics plate reads delay along x and a spectra plate reads wavelength.
+fn frame_from_axes(session: &Session, panel: &mut PanelModel, horizontal: bool) {
+    let Some(dataset) = session.dataset() else {
+        return;
+    };
+    let version = session.version.unwrap_or(dataset.active_version);
+    if let Ok((wavelength, delay)) = dataset.axes(version) {
+        panel.x.range = Some(if horizontal {
+            wavelength.range()
+        } else {
+            delay.range()
+        });
+        panel.y.range = Some(if horizontal {
+            delay.range()
+        } else {
+            wavelength.range()
+        });
+    }
 }
 
 fn line_style(color: Rgba, width: f32) -> SeriesStyle {
@@ -477,9 +564,16 @@ mod tests {
         session.select_wavelength(550.0).unwrap();
         let content = kinetics_content(&session);
         assert_eq!(content.series.len(), 2);
-        // The linked trace is last, so it is drawn on top.
+        // The linked trace is last, so it is drawn on top and in the accent.
         assert_eq!(content.series[1].style.color, accent());
-        assert_eq!(content.series[0].style.dash, DashPattern::Dashed);
+        // A kept curve takes its colour from its place on the wavelength axis.
+        assert_eq!(content.series[0].style.color, ramp(0, 1));
+        assert_ne!(content.series[0].style.color, accent());
+        // Every curve is named, so the legend can be read without a key.
+        assert!(content.series[0].label.starts_with("600"));
+        assert!(content.series[1].label.starts_with("550"));
+        // And the records behind them refer to the dataset, not to the numbers.
+        assert_eq!(content.records.len(), 2);
         // The delay axis uses the split linear/logarithmic convention.
         assert_eq!(
             content.panel.x.scale,
@@ -500,10 +594,48 @@ mod tests {
     fn the_spectra_scene_uses_the_wavelength_axis_and_shared_limits() {
         let session = session();
         let content = spectra_content(&session);
-        assert_eq!(content.series.len(), 1);
+        // The plate opens on the reference implementation's delay grid, snapped
+        // to this matrix's measured delays.
+        assert!(content.series.len() > 1, "{}", content.series.len());
         assert_eq!(content.panel.x.range, Some((500.0, 695.0)));
         let (low, high) = content.panel.y.range.unwrap();
         assert!(low < high);
+        // The ramp runs with the delay axis, and the last curve is the linked
+        // one in the accent colour.
+        assert_eq!(content.series[0].style.color, ramp(0, content.series.len() - 1));
+        assert_eq!(
+            content.series.last().unwrap().style.color,
+            accent(),
+            "the linked spectrum is accented"
+        );
+        // Colours are distinct, so seventeen curves are not one blur.
+        let mut colors: Vec<(u8, u8, u8)> = content
+            .series
+            .iter()
+            .map(|series| (series.style.color.r, series.style.color.g, series.style.color.b))
+            .collect();
+        let count = colors.len();
+        colors.sort();
+        colors.dedup();
+        assert_eq!(colors.len(), count);
+    }
+
+    #[test]
+    fn an_empty_plate_is_framed_at_the_matrix_it_would_show() {
+        // Not at a unit box: the axis says something about this sample even
+        // before a wavelength is chosen.
+        let mut session = session();
+        session.comparison_wavelengths.clear();
+        session.trace = None;
+        let kinetics = kinetics_content(&session);
+        assert!(kinetics.series.is_empty());
+        assert_eq!(kinetics.panel.x.range, Some((-1.0, 100.0)));
+        session.comparison_delays.clear();
+        session.spectrum = None;
+        let spectra = spectra_content(&session);
+        assert!(spectra.series.is_empty());
+        assert_eq!(spectra.panel.x.range, Some((500.0, 695.0)));
+        assert_eq!(spectra.panel.y.range, Some((-1.0, 100.0)));
     }
 
     #[test]

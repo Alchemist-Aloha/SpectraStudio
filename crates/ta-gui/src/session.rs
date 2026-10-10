@@ -113,6 +113,17 @@ impl Sampling {
     }
 }
 
+/// The delays the reference implementation shows spectra at by default.
+///
+/// `auto_taspectra` plots these seventeen points, each snapped to the nearest
+/// measured delay, and drops the ones that snap onto the same sample. Keeping
+/// the list here means the spectra plate opens on the same figure the notebook
+/// would have drawn.
+pub const DEFAULT_SPECTRUM_DELAYS: [f64; 17] = [
+    -0.5, -0.2, 0.0, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0,
+    1000.0, 1500.0,
+];
+
 /// Everything the workspace knows.
 #[derive(Debug)]
 pub struct Session {
@@ -206,8 +217,6 @@ impl Session {
         self.project.add_dataset(dataset);
         self.opened = Some(id);
         self.version = Some(version);
-        self.comparison_wavelengths.clear();
-        self.comparison_delays.clear();
         self.reseed_selection();
         self.status.info(format!("{name}: {rows} wavelengths × {delays} delays"));
         self.dirty = true;
@@ -226,17 +235,210 @@ impl Session {
         let delays = dataset.delay().len();
         self.opened = Some(id);
         self.version = Some(version);
-        self.comparison_wavelengths.clear();
-        self.comparison_delays.clear();
         self.reseed_selection();
         self.status.info(format!("{name}: {rows} wavelengths × {delays} delays"));
     }
 
-    /// Chooses the strongest wavelength and the first positive delay.
+    /// Chooses the strongest wavelength and the first positive delay, and lays
+    /// the spectra out on the reference implementation's default delay grid.
     fn reseed_selection(&mut self) {
         self.trace = None;
         self.spectrum = None;
+        self.comparison_wavelengths.clear();
+        self.comparison_delays.clear();
         self.fill_missing_selection();
+        self.seed_default_delays();
+    }
+
+    /// Puts the reference implementation's delay grid on the spectra plate.
+    ///
+    /// Each request is snapped to a measured delay and duplicates are dropped,
+    /// which is exactly what `find_closest_value` does: a matrix sampled at 1 ps
+    /// shows one curve where the grid asks for sixteen times that all land on it.
+    /// The linked spectrum is left out, because it is drawn as its own curve.
+    pub fn seed_default_delays(&mut self) {
+        let Some(dataset) = self.dataset() else {
+            return;
+        };
+        let version = self.version.unwrap_or(dataset.active_version);
+        let Ok((_, delay)) = dataset.axes(version) else {
+            return;
+        };
+        let (low, high) = delay.range();
+        let linked = self
+            .spectrum
+            .as_ref()
+            .map(|spectrum| delay.nearest(spectrum.delay.coordinate).0);
+        let mut seen: Vec<usize> = Vec::new();
+        let mut chosen: Vec<f64> = Vec::new();
+        for requested in DEFAULT_SPECTRUM_DELAYS {
+            // A grid point outside the measured range has no sample to sit on.
+            if requested < low - f64::EPSILON || requested > high + f64::EPSILON {
+                continue;
+            }
+            let (index, value) = delay.nearest(requested);
+            if seen.contains(&index) || Some(index) == linked {
+                continue;
+            }
+            seen.push(index);
+            chosen.push(value);
+        }
+        self.comparison_delays = chosen;
+    }
+
+    // -- adding to the linked plates (b) and (c) ---------------------------
+
+    /// Adds the current selection — or a typed coordinate — to the kinetics
+    /// plate. The measured sample decides duplicates, so adding 620 nm twice
+    /// adds it once.
+    pub fn add_wavelength(&mut self, wavelength: f64) -> Result<()> {
+        let dataset = self
+            .dataset()
+            .ok_or_else(|| CoreError::invalid("no dataset is open"))?;
+        let version = self.version.unwrap_or(dataset.active_version);
+        let (axis, _) = dataset.axes(version)?;
+        let index = axis.nearest(wavelength).0;
+        let linked = self
+            .trace
+            .as_ref()
+            .map(|trace| axis.nearest(trace.wavelength.coordinate).0);
+        if Some(index) == linked {
+            return Err(CoreError::invalid(
+                "that wavelength is already the linked trace",
+            ));
+        }
+        if self
+            .comparison_wavelengths
+            .iter()
+            .any(|kept| axis.nearest(*kept).0 == index)
+        {
+            return Err(CoreError::invalid(
+                "that wavelength is already on the kinetics plate",
+            ));
+        }
+        let value = axis.values()[index];
+        self.comparison_wavelengths.push(value);
+        self.comparison_wavelengths
+            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Adds a delay to the spectra plate, snapped to the nearest measured one.
+    pub fn add_delay(&mut self, delay: f64) -> Result<()> {
+        let dataset = self
+            .dataset()
+            .ok_or_else(|| CoreError::invalid("no dataset is open"))?;
+        let version = self.version.unwrap_or(dataset.active_version);
+        let (_, axis) = dataset.axes(version)?;
+        let index = axis.nearest(delay).0;
+        let linked = self
+            .spectrum
+            .as_ref()
+            .map(|spectrum| axis.nearest(spectrum.delay.coordinate).0);
+        if Some(index) == linked {
+            return Err(CoreError::invalid(
+                "that delay is already the linked spectrum",
+            ));
+        }
+        if self
+            .comparison_delays
+            .iter()
+            .any(|kept| axis.nearest(*kept).0 == index)
+        {
+            return Err(CoreError::invalid(
+                "that delay is already on the spectra plate",
+            ));
+        }
+        let value = axis.values()[index];
+        self.comparison_delays.push(value);
+        self.comparison_delays
+            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Adds the current selection to the kinetics plate, and moves the
+    /// selection on by one measured sample so a run of them is two clicks each.
+    pub fn add_current_wavelength(&mut self) -> Result<()> {
+        let coordinate = self
+            .trace
+            .as_ref()
+            .map(|trace| trace.wavelength.coordinate)
+            .ok_or_else(|| CoreError::invalid("no wavelength is selected"))?;
+        self.add_wavelength(coordinate)
+    }
+
+    pub fn add_current_delay(&mut self) -> Result<()> {
+        let coordinate = self
+            .spectrum
+            .as_ref()
+            .map(|spectrum| spectrum.delay.coordinate)
+            .ok_or_else(|| CoreError::invalid("no delay is selected"))?;
+        self.add_delay(coordinate)
+    }
+
+    pub fn remove_wavelength(&mut self, index: usize) {
+        if index < self.comparison_wavelengths.len() {
+            self.comparison_wavelengths.remove(index);
+            self.dirty = true;
+        }
+    }
+
+    pub fn remove_delay(&mut self, index: usize) {
+        if index < self.comparison_delays.len() {
+            self.comparison_delays.remove(index);
+            self.dirty = true;
+        }
+    }
+
+    pub fn clear_wavelengths(&mut self) {
+        self.comparison_wavelengths.clear();
+        self.dirty = true;
+    }
+
+    pub fn clear_delays(&mut self) {
+        self.comparison_delays.clear();
+        self.dirty = true;
+    }
+
+    /// The label a kept wavelength shows: the plate's convention, so the chip
+    /// and the legend name the same curve the same way.
+    pub fn wavelength_label(&self, wavelength: f64) -> String {
+        crate::plates::wavelength_label(wavelength)
+    }
+
+    /// The label a kept delay shows: the plate's convention, so the chip and
+    /// the legend name the same curve the same way.
+    pub fn delay_label(&self, delay: f64) -> String {
+        crate::plates::delay_label(delay)
+    }
+
+    /// Whether the open dataset carries a time-zero correction anywhere in its
+    /// chain.
+    pub fn has_time_zero_correction(&self) -> bool {
+        self.dataset().is_some_and(|dataset| {
+            dataset
+                .versions
+                .iter()
+                .any(|version| matches!(version.op, Some(ta_core::ProcessingOp::TimeZero(_))))
+        })
+    }
+
+    /// The datasets loaded in the project, oldest first, for the index.
+    pub fn datasets(&self) -> Vec<(DatasetId, String, usize, bool)> {
+        self.project
+            .datasets
+            .iter()
+            .map(|dataset| {
+                (
+                    dataset.id,
+                    dataset.name.clone(),
+                    dataset.versions.len(),
+                    Some(dataset.id) == self.opened,
+                )
+            })
+            .collect()
     }
 
     /// Fills only what is missing, so reopening a project keeps the trace and
@@ -638,33 +840,65 @@ impl Session {
                 dataset.shape_of(version_id).map(|s| s.0).unwrap_or(0),
                 dataset.shape_of(version_id).map(|s| s.1).unwrap_or(0),
             ),
-            PlateId::Kinetics => match &self.trace {
-                Some(selection) => match kinetic_trace(dataset, selection) {
-                    Ok(trace) => format!(
-                        "Kinetics at {}. {version_label}; {} points from {t_low:.3} to {t_high:.3} ps.",
-                        trace.label,
-                        trace.len(),
-                    ),
-                    Err(error) => format!("Kinetics unavailable: {error}"),
-                },
-                None => "No wavelength selected.".to_string(),
+            PlateId::Kinetics => match self.kinetics().as_slice() {
+                [] => "No wavelength chosen yet: click the contour, or type one in the panel.".to_string(),
+                traces => {
+                    let linked = traces.last().expect("the list is not empty");
+                    let kept = traces.len() - 1;
+                    let mut text = format!(
+                        "Kinetics at {} ({}); {} point{} from {t_low:.3} to {t_high:.3} ps",
+                        linked.label,
+                        version_label,
+                        linked.len(),
+                        if linked.len() == 1 { "" } else { "s" },
+                    );
+                    if kept > 0 {
+                        let others: Vec<String> = traces[..kept]
+                            .iter()
+                            .map(|trace| trace.label.clone())
+                            .collect();
+                        text.push_str(&format!(
+                            ", with {kept} more at {}",
+                            others.join(", ")
+                        ));
+                    }
+                    text.push('.');
+                    text
+                }
             },
             PlateId::Spectra => {
                 let spectra = self.spectra();
                 if spectra.is_empty() {
-                    return "No delay selected.".to_string();
+                    return "No delay chosen yet: click the contour, or press the default grid in the panel.".to_string();
                 }
-                let labels: Vec<String> = spectra
-                    .iter()
-                    .map(|spectrum| spectrum.label.clone())
-                    .collect();
-                format!(
-                    "Spectra at {}. {version_label}; {} wavelengths, shared scale.",
-                    labels.join(", "),
-                    spectra[0].len(),
-                )
+                let linked = spectra.last().expect("the list is not empty");
+                let kept = spectra.len() - 1;
+                let mut text = format!(
+                    "Spectra at {} ({}); {} wavelengths, shared scale, colour running with delay",
+                    linked.label, version_label, linked.len(),
+                );
+                if kept > 0 {
+                    let first = &spectra[0].label;
+                    let last = &spectra[kept - 1].label;
+                    text.push_str(&format!(
+                        ". {kept} more from {first} to {last}, sampled at the nearest measured delays"
+                    ));
+                }
+                text.push('.');
+                text
             }
-            PlateId::TimeZero => "No time-zero correction has been set for this dataset.".to_string(),
+            PlateId::TimeZero => {
+                let fitted = dataset
+                    .versions
+                    .iter()
+                    .any(|version| matches!(version.op, Some(ta_core::ProcessingOp::TimeZero(_))));
+                if fitted {
+                    "The correction curve this version was built with.".to_string()
+                } else {
+                    "No time-zero correction for this version. Fit a trace in FitWorkbench and press Auto time zero, or drag a line on the contour."
+                        .to_string()
+                }
+            }
         }
     }
 
@@ -869,22 +1103,96 @@ mod tests {
         // 550 nm carries the largest mean magnitude, so it is where the shell
         // starts.
         assert!(trace.label.starts_with("550"));
-        // And the spectrum starts at the first positive delay.
+        // And the spectrum starts at the first positive delay, drawn last.
         let spectra = session.spectra();
-        assert_eq!(spectra.len(), 1);
-        assert!(spectra[0].label.starts_with("1"));
+        assert!(spectra.last().unwrap().label.starts_with("1"));
+    }
+
+    #[test]
+    fn a_dataset_opens_on_the_reference_implementations_delay_grid() {
+        // `auto_taspectra` plots these seventeen points, each snapped to a
+        // measured delay, with the ones that land on the same sample dropped.
+        let session = session();
+        let spectra = session.spectra();
+        let kept: Vec<String> = spectra[..spectra.len() - 1]
+            .iter()
+            .map(|spectrum| spectrum.label.clone())
+            .collect();
+        // The fixture's delays are -1, 0, 1 and 10 ps. The grid's -0.5 snaps
+        // to -1, -0.2 and 0 snap to 0, 0.1 through 2 all snap to 1, and 5
+        // through 1500 all snap to 10 — so four requests survive, and 1 ps is
+        // left out because it is the linked spectrum's own sample.
+        assert_eq!(kept, vec!["-1.0000 ps", "0.0000 ps", "10.0000 ps"]);
+        assert!(session
+            .spectra()
+            .last()
+            .unwrap()
+            .label
+            .starts_with("1.0000"));
+    }
+
+    #[test]
+    fn a_grid_point_outside_the_measured_range_is_not_invented() {
+        // Every default delay is requested; only the ones a matrix actually
+        // measured can be drawn, and the count says so.
+        let session = session();
+        let dataset = session.dataset().unwrap();
+        let version = session.version.unwrap();
+        let (_, delay) = dataset.axes(version).unwrap();
+        for value in &session.comparison_delays {
+            assert!(delay.contains(*value), "{value} is not a measured delay");
+        }
+        // 1000 and 1500 ps are in the reference's grid but not in this matrix.
+        assert!(!session.comparison_delays.iter().any(|value| *value > 100.0));
+    }
+
+    #[test]
+    fn adding_a_wavelength_twice_adds_it_once() {
+        let mut session = session();
+        session.add_wavelength(600.0).unwrap();
+        assert_eq!(session.comparison_wavelengths.len(), 1);
+        // 601 nm snaps to the same measured sample as 600 nm.
+        assert!(session.add_wavelength(601.0).is_err());
+        assert_eq!(session.comparison_wavelengths.len(), 1);
+        // And the linked trace cannot be kept twice either.
+        assert!(session.add_wavelength(550.0).is_err());
+    }
+
+    #[test]
+    fn the_kept_curves_are_ordered_along_the_axis_they_were_taken_on() {
+        let mut session = session();
+        session.add_wavelength(650.0).unwrap();
+        session.add_wavelength(500.0).unwrap();
+        assert_eq!(session.comparison_wavelengths, vec![500.0, 650.0]);
+        session.clear_delays();
+        session.add_delay(10.0).unwrap();
+        session.add_delay(0.0).unwrap();
+        let delays = session.comparison_delays.clone();
+        let mut sorted = delays.clone();
+        sorted.sort_by(f64::total_cmp);
+        assert_eq!(delays, sorted);
+    }
+
+    #[test]
+    fn removing_a_curve_leaves_the_link_where_it_was() {
+        let mut session = session();
+        session.add_wavelength(650.0).unwrap();
+        let linked = session.current_trace().unwrap().label.clone();
+        session.remove_wavelength(0);
+        assert!(session.comparison_wavelengths.is_empty());
+        assert_eq!(session.current_trace().unwrap().label, linked);
     }
 
     #[test]
     fn choosing_a_wavelength_moves_the_trace_and_leaves_the_spectrum_alone() {
         let mut session = session();
-        let before = session.spectra()[0].label.clone();
+        let before = session.spectra().last().unwrap().label.clone();
         session.select_wavelength(600.0).unwrap();
         let trace = session.current_trace().unwrap();
         assert!(trace.label.starts_with("600"));
         // The other plate did not move: the link runs one way, which is what
         // stops two views updating each other.
-        assert_eq!(session.spectra()[0].label, before);
+        assert_eq!(session.spectra().last().unwrap().label, before);
     }
 
     #[test]
@@ -892,7 +1200,7 @@ mod tests {
         let mut session = session();
         let before = session.current_trace().unwrap().label.clone();
         session.select_delay(10.0).unwrap();
-        assert!(session.spectra()[0].label.starts_with("10"));
+        assert!(session.spectra().last().unwrap().label.starts_with("10"));
         assert_eq!(session.current_trace().unwrap().label, before);
     }
 
@@ -901,7 +1209,7 @@ mod tests {
         let mut session = session();
         session.select_point(650.0, 0.0).unwrap();
         assert!(session.current_trace().unwrap().label.starts_with("650"));
-        assert!(session.spectra()[0].label.starts_with("0"));
+        assert!(session.spectra().last().unwrap().label.starts_with("0"));
     }
 
     #[test]

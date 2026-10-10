@@ -459,11 +459,25 @@ fn compute_frame(
         (width, height),
     );
     let mut layout = layout;
-    // A crosshair whose coordinate lands on a tick would write two numbers on
-    // top of each other. The crosshair's number is the more precise one, so the
-    // tick steps aside; the axis keeps every other tick it had.
-    if scene.show_crosshair {
-        if let Some((x, y)) = state.hover {
+    // A crosshair or a cursor whose coordinate lands on a tick would write two
+    // numbers on top of each other. The marker's number is the more precise one,
+    // so the tick steps aside; the axis keeps every other tick it had.
+    {
+        let mut marks: Vec<(f64, f64)> = Vec::new();
+        if scene.show_crosshair {
+            if let Some((x, y)) = state.hover {
+                marks.push((x, y));
+            }
+        }
+        for cursor in &scene.cursors {
+            // A cursor on the wavelength axis is a vertical line, so only the x
+            // coordinate matters; a delay cursor is the other way round.
+            match cursor.axis {
+                ta_core::AxisKind::Wavelength => marks.push((cursor.value, state.y_range.0)),
+                _ => marks.push((state.x_range.0, cursor.value)),
+            }
+        }
+        for (x, y) in marks {
             if let Some(pixel) = layout
                 .viewport(state.x_range, state.y_range, x_scale, y_scale)
                 .data_to_pixel(x, y)

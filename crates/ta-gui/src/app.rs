@@ -171,6 +171,14 @@ pub struct Workspace {
     pub studio_plates: Vec<Plate>,
     /// Whether a data export writes the visible window or everything measured.
     pub studio_visible_only: bool,
+    /// What the title bar currently says, so it is only set when it changes.
+    window_title: String,
+    /// Whether this dataset has a time-zero correction to show. The fourth
+    /// plate only earns its space when it has something to say.
+    show_time_zero: bool,
+    /// Set when the user asks for the fourth plate without a correction to put
+    /// in it, so the empty axis can still be studied.
+    show_time_zero_plate: bool,
 }
 
 impl Workspace {
@@ -197,6 +205,9 @@ impl Workspace {
             current_plate: PlateId::Kinetics,
             studio_plates: Vec::new(),
             studio_visible_only: true,
+            window_title: String::new(),
+            show_time_zero: false,
+            show_time_zero_plate: false,
         };
         workspace.build();
         workspace
@@ -297,6 +308,7 @@ impl Workspace {
             self.fit_plates.clear();
         }
         self.fit_caption = crate::fit_panel::fit_caption(&self.session);
+        self.show_time_zero = self.session.has_time_zero_correction();
         match self.studio_preview() {
             Some(content) => {
                 let scene = scene_of(content, views.clone(), None, Vec::new(), false);
@@ -750,8 +762,47 @@ impl Workspace {
             }))
     }
 
-    fn plate_index(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn plate_index(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let entries = self.session.chain();
+        // Every dataset in the project, so a second import does not make the
+        // first one unreachable.
+        let datasets: Vec<AnyElement> = self
+            .session
+            .datasets()
+            .into_iter()
+            .map(|(id, name, versions, active)| {
+                div()
+                    .id(ElementId::Name(format!("dataset-{id}").into()))
+                    .flex()
+                    .items_baseline()
+                    .justify_between()
+                    .px_3()
+                    .py_1()
+                    .bg(if active { ink::paper() } else { ink::ground() })
+                    .border_b_1()
+                    .border_color(ink::hair())
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(if active { ink::accent() } else { ink::text() })
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(ink::muted())
+                            .child(format!("{versions} versions")),
+                    )
+                    .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                        if Some(id) != workspace.session.opened {
+                            workspace.session.open_bench(id);
+                            workspace.touch_matrix();
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
+            .collect();
         let dataset = self.session.dataset().map(|dataset| dataset.name.clone());
         let dataset_open = dataset.is_some();
         let mut rows: Vec<AnyElement> = Vec::new();
@@ -808,6 +859,17 @@ impl Workspace {
             );
         }
 
+        let many = datasets.len() > 1;
+        let first_label = if many {
+            "datasets".to_string()
+        } else {
+            dataset.clone().unwrap_or_else(|| "no dataset".to_string())
+        };
+        let second_label = if many {
+            "versions".to_string()
+        } else {
+            "processing chain".to_string()
+        };
         div()
             .w(px(INDEX_WIDTH))
             .h_full()
@@ -816,7 +878,9 @@ impl Workspace {
             .bg(ink::ground())
             .border_r_1()
             .border_color(ink::rule())
-            .child(self.section_label(dataset.unwrap_or_else(|| "no dataset".to_string())))
+            .child(self.section_label(first_label))
+            .children(datasets)
+            .child(self.section_label(second_label))
             .children(rows)
             .children(if dataset_open {
                 Vec::new()
@@ -1121,18 +1185,37 @@ impl Workspace {
                     .child(widgets::number_input(&channels_state, 48.0))
                     .child(widgets::readout("channels")),
             ))
-            .child(self.field(
-                "Trace",
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(widgets::value_text(trace_label))
-                    .child(widgets::readout(format!("sampled at {trace} nm"))),
+            .child(self.kept_block(
+                "b",
+                "Kinetics",
+                trace_label.clone(),
+                self.session
+                    .comparison_wavelengths
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        (self.session.wavelength_label(*value), *value, index)
+                    })
+                    .collect(),
+                true,
+                cx,
             ))
-            .child(self.field(
-                "Spectrum",
-                widgets::readout(format!("sampled at {spectrum} ps")),
+            .child(self.kept_block(
+                "c",
+                "Spectra",
+                self.session
+                    .spectrum
+                    .as_ref()
+                    .map(|spectrum| self.session.delay_label(spectrum.delay.coordinate))
+                    .unwrap_or_else(|| "—".to_string()),
+                self.session
+                    .comparison_delays
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| (self.session.delay_label(*value), *value, index))
+                    .collect(),
+                false,
+                cx,
             ))
             .child(self.field(
                 "Colour limits",
@@ -1141,6 +1224,27 @@ impl Workspace {
                     limits.min, limits.max
                 )),
             ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(ink::hair())
+                    .child(widgets::small_caps("plates"))
+                    .child(widgets::switch(
+                        "time-zero plate",
+                        self.show_time_zero_plate || self.show_time_zero,
+                        cx,
+                        |workspace| {
+                            workspace.show_time_zero_plate = !workspace.show_time_zero_plate;
+                            workspace.touch();
+                        },
+                    ))
+                    .child(widgets::readout("(d) shows the correction curve")),
+            )
             .child(
                 div()
                     .flex()
@@ -1168,6 +1272,177 @@ impl Workspace {
                         }
                     })),
             )
+    }
+
+    /// One linked plate's selection: what is drawn, how to add another, and the
+    /// list of what is already there. Removing a curve is one click on it.
+    fn kept_block(
+        &self,
+        letter: &'static str,
+        title: &'static str,
+        linked: String,
+        kept: Vec<(String, f64, usize)>,
+        kinetics: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let count = kept.len();
+        let chips: Vec<AnyElement> = kept
+            .into_iter()
+            .map(|(label, _value, index)| {
+                // A chip reads as the number it removes rather than as an
+                // anonymous cross, so the list can be edited without hovering.
+                div()
+                    .id(ElementId::Name(format!("kept-{letter}-{index}").into()))
+                    .px_2()
+                    .py_1()
+                    .text_size(px(11.0))
+                    .text_color(ink::text())
+                    .bg(ink::paper())
+                    .border_1()
+                    .border_color(ink::rule())
+                    .hover(|style| style.border_color(ink::accent()).text_color(ink::accent()))
+                    .child(format!("{label} ✕"))
+                    .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                        if kinetics {
+                            workspace.session.remove_wavelength(index);
+                        } else {
+                            workspace.session.remove_delay(index);
+                        }
+                        workspace.touch();
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        let summary = if count == 0 {
+            "nothing added yet".to_string()
+        } else {
+            format!("{count} added")
+        };
+        let default_grid = !kinetics;
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(ink::hair())
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(ink::muted())
+                            .child(format!("({letter}) {}", title.to_uppercase())),
+                    )
+                    .child(widgets::readout(summary)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(widgets::value_text(linked))
+                    .child(widgets::readout(if kinetics {
+                        "the linked trace"
+                    } else {
+                        "the linked spectrum"
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(widgets::action(
+                        if kinetics {
+                            "Add this wavelength"
+                        } else {
+                            "Add this delay"
+                        },
+                        false,
+                        cx,
+                        move |workspace, _, _| {
+                            let outcome = if kinetics {
+                                workspace.session.add_current_wavelength()
+                            } else {
+                                workspace.session.add_current_delay()
+                            };
+                            match outcome {
+                                Ok(()) => workspace.touch(),
+                                Err(error) => workspace
+                                    .session
+                                    .status
+                                    .problem(format!("{error}")),
+                            }
+                        },
+                    ))
+                    .child(if default_grid {
+                        widgets::action("Default grid", false, cx, |workspace, _, _| {
+                            workspace.session.seed_default_delays();
+                            workspace.session.status.info(format!(
+                                "the spectra plate is showing the default grid",
+                            ));
+                            workspace.touch();
+                        })
+                        .into_any_element()
+                    } else {
+                        widgets::action("Clear", false, cx, |workspace, _, _| {
+                            workspace.session.clear_wavelengths();
+                            workspace.touch();
+                        })
+                        .into_any_element()
+                    })
+                    .child(if default_grid {
+                        widgets::action("Clear", false, cx, |workspace, _, _| {
+                            workspace.session.clear_delays();
+                            workspace.touch();
+                        })
+                        .into_any_element()
+                    } else {
+                        // A run of wavelengths is added one after another: the
+                        // selection steps on to the next measured sample.
+                        widgets::action("Next sample →", false, cx, |workspace, _, _| {
+                            workspace.step_selection(1)
+                        })
+                        .into_any_element()
+                    }),
+            )
+            .child(div().flex().flex_wrap().gap_1().children(chips))
+    }
+
+    /// Moves the linked selection one measured sample along the axis, so a run
+    /// of curves can be built by clicking Add and then this.
+    fn step_selection(&mut self, delta: isize) {
+        let Some(dataset) = self.session.dataset() else {
+            return;
+        };
+        let version = self.session.version.unwrap_or(dataset.active_version);
+        let Ok((wavelength, delay)) = dataset.axes(version) else {
+            return;
+        };
+        let Some(wanted) = self
+            .session
+            .trace
+            .as_ref()
+            .map(|trace| trace.wavelength.coordinate)
+        else {
+            return;
+        };
+        let _ = delay;
+        let (index, _) = wavelength.nearest(wanted);
+        let next = (index as isize + delta).clamp(0, wavelength.len() as isize - 1) as usize;
+        let value = wavelength.values()[next];
+        let outcome = self.session.select_wavelength(value);
+        if let Err(error) = outcome {
+            self.session.status.problem(format!("{error}"));
+        }
+        self.touch();
     }
 
     fn field(&self, label: &str, value: impl IntoElement) -> impl IntoElement {
@@ -1277,6 +1552,13 @@ impl Render for Workspace {
         if self.built != self.revision {
             self.refresh_scenes();
         }
+        // The title bar names the dataset and the layout, so a window among
+        // several says which one it is.
+        let title = format!("{} — Spectra Studio", self.session.title());
+        if title != self.window_title {
+            _window.set_window_title(&title);
+            self.window_title = title;
+        }
         // The coordinate fields follow the selection, so a click on a plate
         // writes the number the user would otherwise have typed.
         self.sync_coordinate_fields(_window, cx);
@@ -1307,29 +1589,30 @@ impl Workspace {
         let contour = self.plate_block(0, cx);
         let kinetics = self.plate_block(1, cx);
         let spectra = self.plate_block(2, cx);
-        let time_zero = self.plate_block(3, cx);
         let inspector = self.inspector(window, cx);
+        // The two linked plates are what a user reads after the contour, so
+        // they take the space that is left rather than a fixed slice of it. The
+        // time-zero plate only appears when there is a curve to show, or when
+        // the user asks for it.
+        let block = v_resizable("figure-block")
+            .child(resizable_panel().size(px(380.0)).child(contour))
+            .child(resizable_panel().child(
+                h_resizable("linked-plates")
+                    .child(resizable_panel().child(kinetics))
+                    .child(resizable_panel().child(spectra)),
+            ));
+        let block = if self.show_time_zero || self.show_time_zero_plate {
+            block.child(resizable_panel().size(px(190.0)).child(self.plate_block(3, cx)))
+        } else {
+            block
+        };
         div()
             .flex_1()
             .min_h(px(0.0))
             .w_full()
             .flex()
             .child(self.plate_index(cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(
-                        v_resizable("figure-block")
-                            .child(resizable_panel().size(px(430.0)).child(contour))
-                            .child(resizable_panel().child(
-                                h_resizable("linked-plates")
-                                    .child(resizable_panel().child(kinetics))
-                                    .child(resizable_panel().child(spectra)),
-                            ))
-                            .child(resizable_panel().size(px(240.0)).child(time_zero)),
-                    ),
-            )
+            .child(div().flex_1().min_w(px(0.0)).child(block))
             .child(inspector)
             .into_any_element()
     }
