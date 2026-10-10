@@ -79,18 +79,80 @@ test that holds the line.
   applies it as `self.tamatrix_avg_burncorr[:, 2:] *= burn_correction`, where
   `burn_correction` has one element per delay while the slice has two fewer.
   The two shapes cannot broadcast, so the call as written raises. It also reads
-  `self.mat_array[pt, pt2 + 2, 0]`, an index that runs off the end of the delay
-  axis near the end of the array.
-* **Rust:** `ta_processing::burn` will take the sampled wavelength and reference
-  delay the interface gives it, compute the same per-delay factor from the
-  first and last experiment, and apply it from the first delay column onwards.
-  The index is checked before use.
+  `self.mat_array[pt, pt2 + 2, 0]` — the third delay point past the one nearest
+  1 ps — where `pt2 + 2` runs off the end of the delay axis near the end of the
+  array.
+* **Rust:** `ta_processing::burn::correct_burn` takes the same inputs, clamps the
+  probe index instead of running off the end, and applies the factors from the
+  reference delay onwards. Columns before it are left alone, because they are
+  the baseline the drift is measured against and the background subtraction has
+  already removed their offset.
 * **Why:** the intent is clear from the surrounding code, and the intent is what
   a port owes the user. Reproducing an arithmetic error that cannot run is not
   fidelity.
-* **Proved by:** `ta-processing` tests at the point this lands (milestone M4);
-  until then the operation is absent from the interface rather than present and
-  wrong.
+* **Proved by:** `ta-processing/src/burn.rs`, which checks the factor per point,
+  the clamped probe, a zero reference signal, a missing reference point, and
+  experiments of different shapes.
+
+## 7. The general amplitude is honoured
+
+* **Python:** `multiexp_func` ends with `result *= 1`, so the parameter `w1`,
+  documented as "general amplitude of the fitting", never multiplies anything.
+* **Rust:** `ta_fitting::model::evaluate` multiplies by `amplitude_scale`.
+* **Why:** the parameter is in the model's documented interface and in the
+  parameter template the interface shows. A parameter that silently does nothing
+  is worse than one that works; at its default of 1 the two agree exactly.
+* **Proved by:** `ta-fitting/src/model.rs`,
+  `the_amplitude_scale_multiplies_the_whole_curve`, and the parity test against
+  the reference expression with `w1 = 1`.
+
+## 8. The automatic correction curve is a polynomial in wavelength
+
+* **Python:** `fit_correlation` fits each sampled wavelength's time zero, then
+  calls `polyfit`, whose model is `polynomial_func(x, a, b, c) = a / (1e-9 +
+  x²) + c` with `x` the *wavelength* and `b` unused. So the "fitted correction
+  line" is an inverse-square in wavelength with one dead parameter, which is not
+  the chirp shape and is the auxiliary function `spec.md` §2.1 asks to
+  investigate.
+* **Rust:** `ta_fitting::chirp::estimate_time_zero_curve` fits a weighted
+  polynomial in wavelength — degree 1 or 2, chosen by the caller — with the
+  weight of each point being the reciprocal of its own residual sum of squares,
+  which is what the reference passes to its curve fit.
+* **Why:** a chirp is a smooth, slowly varying delay offset; a quadratic in
+  wavelength describes it and can be extrapolated over a matrix's range without
+  the pole that `1/(1e-9 + λ²)` has at the origin.
+* **Proved by:** `ta-fitting/src/chirp.rs`, on synthetic matrices with a known
+  linear chirp, a flat time zero, wavelengths below the signal threshold, and too
+  few usable points.
+
+## 9. A fit reports what it can and no more
+
+* **Python:** `lmfit` with the Powell method; a result is kept when
+  `result.success` and `chisqr < 0.15`.
+* **Rust:** a bounded Levenberg–Marquardt solver that reports convergence
+  explicitly, with three deliberate differences. A step that cannot improve the
+  fit counts as convergence rather than failure, because that is a minimum. A
+  parameter sitting on a bound gets no standard error, because the solver had no
+  room to estimate one. A parameter the solver cannot separate — a degenerate
+  covariance — gets no standard error either, instead of a large invented one.
+* **Why:** `spec.md` §12.5 forbids inventing standard errors, and the reference's
+  fixed chi-square threshold is a property of its own data rather than a
+  statement about a fit's quality.
+* **Proved by:** `ta-fitting/src/solver.rs` and `fit.rs`: a straight line
+  recovered exactly, a bound respected, a degenerate model reporting no errors,
+  a bounded non-linear curve recovered, the iteration limit reported as *not*
+  converged, and known lifetimes recovered from a noisy synthetic trace.
+
+## 10. The time-zero boundary is the reference's, and now selectable
+
+* **Python:** `np.interp` clamps outside the measured delays, so the correction
+  silently holds the edge value.
+* **Rust:** `BoundaryMode::Clamp` is the default and reproduces that exactly
+  (verified against numpy on the repository's fixture); `Mask` leaves the sample
+  missing and `Extrapolate` extends the edge slope, both as explicit choices.
+* **Why:** the reference's behaviour is a reasonable default and a poor silent
+  one: a user correcting a chirp near the edge of their delay axis should be able
+  to see that the edge was held rather than measured.
 
 ## 6. Values are not rescaled on import
 

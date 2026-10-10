@@ -21,6 +21,8 @@ import json
 import platform
 from pathlib import Path
 
+import math
+
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[3]
@@ -76,6 +78,113 @@ def read_ta_sheet(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]
     )
     return tawavelength, tatime, tamatrix, {
         "reference_reader_shape": reference_reader_shape
+    }
+
+
+def norm_cdf(x: np.ndarray, scale: float = 1.0) -> np.ndarray:
+    """The standard normal CDF, from the standard library's `erf`.
+
+    `scipy.stats.norm.cdf` is what the reference implementation calls; this is
+    the same function to within an ulp on this machine, and scipy is not
+    installed here.
+    """
+    return np.array([0.5 * math.erfc(-value / (scale * math.sqrt(2))) for value in np.atleast_1d(x)])
+
+
+def multiexp_func(t, w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12):
+    """The reference implementation's model, copied verbatim from
+    `ta_analyzer_core.multiexp_func` (the module itself cannot be imported here
+    because it pulls in lmfit, which is not installed). Each exponential is
+    multiplied by a Gaussian CDF rather than convolved with the instrument
+    response, which is why Spectra Studio keeps this formulation under its own
+    name.
+    """
+    sigma = np.sqrt(w0**2) / (2 * np.sqrt(2 * np.log(2)))
+    result = np.zeros_like(t)
+    for amplitude, lifetime in ((w2, w3), (w4, w5), (w6, w7), (w8, w9)):
+        if lifetime == 0:
+            continue
+        result += amplitude * np.exp(-(t - w10) / lifetime) * norm_cdf(
+            t - w10, sigma
+        )
+    result += w11 + w12 * norm_cdf(t - w10, sigma)
+    result *= 1
+    return result
+
+
+def model_reference() -> dict:
+    """Values of the legacy model at the delays a fit would visit."""
+    params = {
+        "w0": 0.12,
+        "w1": 1.0,
+        "w2": -0.45,
+        "w3": 1.6,
+        "w4": 0.30,
+        "w5": 24.0,
+        "w6": 0.0,
+        "w7": 0.0,
+        "w8": 0.0,
+        "w9": 0.0,
+        "w10": 0.07,
+        "w11": -0.004,
+        "w12": 0.02,
+    }
+    delays = np.array(
+        [-1.0, -0.5, 0.0, 0.05, 0.07, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0,
+         24.0, 50.0, 100.0, 500.0, 1079.7752]
+    )
+    values = multiexp_func(delays, *params.values())
+    # The stable series Spectra Studio evaluates the normal CDF with, so the
+    # comparison is of the model and not of two error functions.
+    cdf = norm_cdf(delays - params["w10"], sigma_of(params["w0"]))
+    with_erfc = np.zeros_like(delays)
+    for amplitude, lifetime in ((params["w2"], params["w3"]), (params["w4"], params["w5"])):
+        with_erfc += amplitude * np.exp(-(delays - params["w10"]) / lifetime) * cdf
+    with_erfc += params["w11"] + params["w12"] * cdf
+    return {
+        "params": params,
+        "delays": [float(value) for value in delays],
+        "values": [float(value) for value in values],
+        "values_erfc": [float(value) for value in with_erfc],
+        "sum": float(np.sum(values)),
+    }
+
+
+def sigma_of(fwhm: float) -> float:
+    return float(np.sqrt(fwhm**2) / (2 * np.sqrt(2 * np.log(2))))
+
+
+def time_zero_reference() -> dict:
+    """The manual time-zero correction, exactly as the reference implements it.
+
+    `auto_tcorr_fit` resamples each wavelength at `delay + offset` with
+    `np.interp`, which clamps outside the measured delays, and keeps the
+    original delay axis. The control points are the repository's own drawn
+    correction line, whose wavelength range is narrower than the matrix's — so
+    this fixture exercises the clamping path as well.
+    """
+    matrix = np.loadtxt(DATA / "NIR800_tcorr")
+    wavelength = np.loadtxt(DATA / "NIR800_tawavelength")
+    delay = np.loadtxt(DATA / "NIR800_tatime")
+    line = np.loadtxt(DATA / "NIR800_line")
+
+    corrected = np.zeros_like(matrix)
+    for i in range(len(wavelength)):
+        offset = np.interp(wavelength[i], line[:, 0], line[:, 1])
+        corrected[i, :] = np.interp(delay + offset, delay, matrix[i, :])
+
+    return {
+        "curve_points": [[float(w), float(t)] for w, t in line],
+        "sum": float(np.sum(corrected)),
+        "min": float(np.min(corrected)),
+        "max": float(np.max(corrected)),
+        "samples": [
+            {"row": row, "col": col, "value": float(corrected[row, col])}
+            for row, col in [(0, 0), (400, 20), (552, 40), (944, 151), (700, 100)]
+        ],
+        "offset_at_550": float(np.interp(550.0, line[:, 0], line[:, 1])),
+        "offset_below_the_curve": float(np.interp(400.0, line[:, 0], line[:, 1])),
+        "offset_above_the_curve": float(np.interp(900.0, line[:, 0], line[:, 1])),
     }
 
 
@@ -206,6 +315,8 @@ def main() -> None:
         },
         "cropped_trace_sum": float(np.nansum(corr_trace)),
         "cropped_trace_index": corr_trace_index,
+        "model": model_reference(),
+        "time_zero": time_zero_reference(),
     }
 
     out = Path(__file__).resolve().parent / "nir800_reference.json"
