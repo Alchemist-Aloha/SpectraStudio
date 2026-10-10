@@ -348,6 +348,7 @@ impl Workspace {
             .as_ref()
             .and_then(|fit| fit.result.clone());
         let mut rows: Vec<AnyElement> = Vec::new();
+        let editing = self.fit_edit_parameters;
         for (index, parameter) in parameters.iter().enumerate() {
             let name = parameter.name.clone();
             let unit = parameter.unit.clone().unwrap_or_default();
@@ -402,25 +403,39 @@ impl Workspace {
                             .text_color(if at_bound { ink::amber() } else { ink::text() })
                             .child(name),
                     )
-                    .child(widgets::number_input(&value_state, 92.0))
-                    .child(widgets::number_input(&bounds_state, 118.0))
-                    .child(widgets::switch("fixed", fixed, cx, move |workspace| {
-                        if let Some(fit) = workspace.session.fit.as_mut() {
-                            if let Some(parameter) = fit.parameters.get_mut(index) {
-                                parameter.fixed = !parameter.fixed;
+                    .child(if editing {
+                        widgets::number_input(&value_state, 92.0).into_any_element()
+                    } else {
+                        div().w(px(92.0)).into_any_element()
+                    })
+                    .child(if editing {
+                        widgets::number_input(&bounds_state, 118.0).into_any_element()
+                    } else {
+                        div().w(px(118.0)).into_any_element()
+                    })
+                    .child(if editing {
+                        widgets::switch("fixed", fixed, cx, move |workspace| {
+                            if let Some(fit) = workspace.session.fit.as_mut() {
+                                if let Some(parameter) = fit.parameters.get_mut(index) {
+                                    parameter.fixed = !parameter.fixed;
+                                }
                             }
-                        }
-                    }))
+                        })
+                        .into_any_element()
+                    } else {
+                        div()
+                            .w(px(56.0))
+                            .text_size(px(10.0))
+                            .text_color(ink::muted())
+                            .child(if fixed { "fixed" } else { "free" })
+                            .into_any_element()
+                    })
                     .child(
                         div()
                             .w(px(46.0))
                             .text_size(px(10.0))
                             .text_color(ink::muted())
-                            .child(if fixed && !unit.is_empty() {
-                                unit
-                            } else {
-                                String::new()
-                            }),
+                            .child(if !unit.is_empty() { unit } else { String::new() }),
                     )
                     .child(
                         div()

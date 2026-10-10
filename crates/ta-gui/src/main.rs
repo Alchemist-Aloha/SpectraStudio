@@ -83,6 +83,7 @@ fn main() {
     }
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
+        app::Workspace::bind_shortcuts(cx);
         let initial = initial.clone();
         gpui_kit::open_window(
             WindowOptions {

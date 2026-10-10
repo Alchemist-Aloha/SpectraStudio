@@ -390,16 +390,40 @@ impl Workspace {
                             .items_center()
                             .gap_3()
                             .child(widgets::em(format!("{name} · {count} series")))
-                            .child(widgets::action("Add selection", true, cx, |workspace, _, _| {
-                                let target = workspace.compare_target;
-                                match workspace.session.add_to_comparison(target) {
-                                    Ok(_) => workspace.touch(),
-                                    Err(error) => workspace
-                                        .session
-                                        .status
-                                        .problem(format!("{error}")),
-                                }
-                            }))
+                            // The button names what it will add — the bench
+                            // dataset's current coordinate — because "the
+                            // selection" is only obvious to whoever made it.
+                            .child(widgets::readout(format!(
+                                "the bench has {}",
+                                self.compare_source_label()
+                            )))
+                            .child(widgets::action_id(
+                                if self.compare_target == SeriesTarget::Trace {
+                                    "Add its trace to the comparison"
+                                } else {
+                                    "Add its spectrum to the comparison"
+                                },
+                                ElementId::Name("compare-add".into()),
+                                true,
+                                cx,
+                                |workspace, _, _| {
+                                    let target = workspace.compare_target;
+                                    match workspace.session.add_to_comparison(target) {
+                                        Ok(_) => {
+                                            let count =
+                                                workspace.session.comparison_series().len();
+                                            workspace.session.status.info(format!(
+                                                "the comparison holds {count} series"
+                                            ));
+                                            workspace.touch();
+                                        }
+                                        Err(error) => workspace
+                                            .session
+                                            .status
+                                            .problem(format!("{error}")),
+                                    }
+                                },
+                            ))
                             .child(widgets::action(
                                 "Add every dataset",
                                 false,
@@ -511,6 +535,30 @@ impl Workspace {
                             )),
                     ),
             )
+    }
+
+    /// What the bench would contribute if it were added: the dataset's name and
+    /// the coordinate the comparison would take from it.
+    pub fn compare_source_label(&self) -> String {
+        let Some(dataset) = self.session.dataset() else {
+            return "no dataset open".to_string();
+        };
+        let coordinate = match self.compare_target {
+            SeriesTarget::Trace => self
+                .session
+                .trace
+                .as_ref()
+                .map(|trace| self.session.wavelength_label(trace.wavelength.coordinate)),
+            SeriesTarget::Spectrum => self
+                .session
+                .spectrum
+                .as_ref()
+                .map(|spectrum| self.session.delay_label(spectrum.delay.coordinate)),
+        };
+        match coordinate {
+            Some(coordinate) => format!("{} at {coordinate}", dataset.name),
+            None => format!("{} and nothing selected", dataset.name),
+        }
     }
 
     /// One comparison pane: the curves, drawn in a plate of their own.

@@ -228,7 +228,32 @@ impl Workspace {
                             .bg(ink::ground())
                             .border_l_1()
                             .border_color(ink::rule())
-                            .child(widgets::small_caps_in_panel("Parameters"))
+                            // The parameter table is where a fit is *driven*,
+                            // so it shows by default; the results column is
+                            // what a reader returns for, so the table can be
+                            // folded away to leave the fitted values.
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .border_b_1()
+                                    .border_color(ink::rule())
+                                    .child(widgets::small_caps_in_panel("Parameters"))
+                                    .child(
+                                        div().px_3().child(widgets::switch(
+                                            "edit start values and bounds",
+                                            self.fit_edit_parameters,
+                                            cx,
+                                            |workspace| {
+                                                workspace.fit_edit_parameters =
+                                                    !workspace.fit_edit_parameters;
+                                                workspace.touch();
+                                            },
+                                        )),
+                                    ),
+                            )
                             .child(
                                 div()
                                     .id(ElementId::Name("fit-parameters".into()))

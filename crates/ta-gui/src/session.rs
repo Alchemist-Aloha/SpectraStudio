@@ -685,6 +685,11 @@ impl Session {
     }
 
     /// The kinetics plate's curves: the kept comparisons and the current trace.
+    /// The curves the kinetics plate draws: the kept wavelengths, then the
+    /// linked trace last so it is drawn on top.
+    ///
+    /// A wavelength that is both kept and linked is one curve, not two: the
+    /// link wins, because it carries the accent, and the kept copy is dropped.
     pub fn kinetics(&self) -> Vec<Trace> {
         let Some(dataset) = self.dataset() else {
             return Vec::new();
@@ -692,26 +697,41 @@ impl Session {
         let Some(template) = self.trace.clone() else {
             return Vec::new();
         };
+        let Ok((axis, _)) = dataset.axes(template.version) else {
+            return Vec::new();
+        };
         let mut wanted: Vec<AxisRequest> = Vec::new();
         for wavelength in &self.comparison_wavelengths {
             wanted.push(self.sampling.request(*wavelength));
         }
-        wanted.push(template.wavelength);
-        wanted
-            .into_iter()
-            .filter_map(|request| {
-                let selection = TraceSelection {
-                    id: template.id,
-                    dataset: template.dataset,
-                    version: template.version,
-                    wavelength: request,
-                };
-                kinetic_trace(dataset, &selection).ok()
-            })
-            .collect()
+        wanted.push(template.wavelength.clone());
+
+        // From the linked curve backwards, so the first sample of each repeated
+        // coordinate wins — which is the linked one — then reversed so the
+        // linked curve is drawn last again.
+        let mut seen: Vec<usize> = Vec::new();
+        let mut traces: Vec<Trace> = Vec::new();
+        for request in wanted.into_iter().rev() {
+            let index = axis.nearest(request.coordinate).0;
+            if seen.contains(&index) {
+                continue;
+            }
+            seen.push(index);
+            let selection = TraceSelection {
+                id: template.id,
+                dataset: template.dataset,
+                version: template.version,
+                wavelength: request,
+            };
+            if let Ok(trace) = kinetic_trace(dataset, &selection) {
+                traces.push(trace);
+            }
+        }
+        traces.reverse();
+        traces
     }
 
-    /// The spectra plate's curves: the kept comparisons and the current delay.
+    /// The spectra the plate draws: the kept delays, then the linked spectrum.
     pub fn spectra(&self) -> Vec<Spectrum> {
         let Some(dataset) = self.dataset() else {
             return Vec::new();
@@ -719,23 +739,35 @@ impl Session {
         let Some(template) = self.spectrum.clone() else {
             return Vec::new();
         };
+        let Ok((_, axis)) = dataset.axes(template.version) else {
+            return Vec::new();
+        };
         let mut wanted: Vec<AxisRequest> = Vec::new();
         for delay in &self.comparison_delays {
             wanted.push(self.sampling.request(*delay));
         }
-        wanted.push(template.delay);
-        wanted
-            .into_iter()
-            .filter_map(|request| {
-                let selection = SpectrumSelection {
-                    id: template.id,
-                    dataset: template.dataset,
-                    version: template.version,
-                    delay: request,
-                };
-                transient_spectrum(dataset, &selection).ok()
-            })
-            .collect()
+        wanted.push(template.delay.clone());
+
+        let mut seen: Vec<usize> = Vec::new();
+        let mut spectra: Vec<Spectrum> = Vec::new();
+        for request in wanted.into_iter().rev() {
+            let index = axis.nearest(request.coordinate).0;
+            if seen.contains(&index) {
+                continue;
+            }
+            seen.push(index);
+            let selection = SpectrumSelection {
+                id: template.id,
+                dataset: template.dataset,
+                version: template.version,
+                delay: request,
+            };
+            if let Ok(spectrum) = transient_spectrum(dataset, &selection) {
+                spectra.push(spectrum);
+            }
+        }
+        spectra.reverse();
+        spectra
     }
 
     /// The kinetic records the kinetics plate draws, in the order it draws
@@ -747,28 +779,37 @@ impl Session {
         let Some(template) = self.trace.clone() else {
             return Vec::new();
         };
+        let Ok((axis, _)) = dataset.axes(template.version) else {
+            return Vec::new();
+        };
         let mut records = Vec::new();
-        for wavelength in self
+        let mut seen: Vec<usize> = Vec::new();
+        let wanted: Vec<f64> = self
             .comparison_wavelengths
             .iter()
-            .chain(std::iter::once(&template.wavelength.coordinate))
-        {
+            .copied()
+            .chain(std::iter::once(template.wavelength.coordinate))
+            .collect();
+        for coordinate in wanted.into_iter().rev() {
+            let index = axis.nearest(coordinate).0;
+            if seen.contains(&index) {
+                continue;
+            }
+            seen.push(index);
             let selection = TraceSelection {
                 id: template.id,
                 dataset: template.dataset,
                 version: template.version,
-                wavelength: self.sampling.request(*wavelength),
+                wavelength: self.sampling.request(coordinate),
             };
-            if kinetic_trace(dataset, &selection).is_ok() {
-                let label = kinetic_trace(dataset, &selection)
-                    .map(|trace| trace.label)
-                    .unwrap_or_default();
+            if let Ok(trace) = kinetic_trace(dataset, &selection) {
                 records.push(ta_core::PlotSeries::new(
-                    label,
+                    trace.label,
                     ta_core::SeriesSource::Trace(selection),
                 ));
             }
         }
+        records.reverse();
         records
     }
 
@@ -780,17 +821,28 @@ impl Session {
         let Some(template) = self.spectrum.clone() else {
             return Vec::new();
         };
+        let Ok((_, axis)) = dataset.axes(template.version) else {
+            return Vec::new();
+        };
         let mut records = Vec::new();
-        for delay in self
+        let mut seen: Vec<usize> = Vec::new();
+        let wanted: Vec<f64> = self
             .comparison_delays
             .iter()
-            .chain(std::iter::once(&template.delay.coordinate))
-        {
+            .copied()
+            .chain(std::iter::once(template.delay.coordinate))
+            .collect();
+        for coordinate in wanted.into_iter().rev() {
+            let index = axis.nearest(coordinate).0;
+            if seen.contains(&index) {
+                continue;
+            }
+            seen.push(index);
             let selection = SpectrumSelection {
                 id: template.id,
                 dataset: template.dataset,
                 version: template.version,
-                delay: self.sampling.request(*delay),
+                delay: self.sampling.request(coordinate),
             };
             if let Ok(spectrum) = transient_spectrum(dataset, &selection) {
                 records.push(ta_core::PlotSeries::new(
@@ -799,6 +851,7 @@ impl Session {
                 ));
             }
         }
+        records.reverse();
         records
     }
 

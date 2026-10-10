@@ -13,7 +13,7 @@ use gpui_kit::component::{h_resizable, resizable_panel, v_resizable};
 // `test` attribute macro, which then shadows the built-in one in this crate's
 // tests.
 use gpui_kit::{
-    div, px, AnyElement, Context, ElementId, FontWeight, InteractiveElement, IntoElement,
+    div, px, AnyElement, App, Context, ElementId, FontWeight, InteractiveElement, IntoElement,
     ParentElement, PathPromptOptions, Render, StatefulInteractiveElement, Styled, Window,
 };
 use std::path::PathBuf;
@@ -90,6 +90,35 @@ pub mod ink {
         value.a = 1.0;
         value
     }
+}
+
+// Each step is its own action, so the key map stays a plain table of keys and
+// actions and the handler has nothing to decode.
+gpui_kit::actions!(
+    spectra_studio,
+    [
+        WavelengthBack,
+        WavelengthForward,
+        DelayBack,
+        DelayForward,
+        KeepWavelength,
+        KeepDelay,
+        FitTrace,
+        ResetViews
+    ]
+);
+
+/// Every key the workspace answers to, so the handler is one match rather than
+/// eight closures.
+pub enum ShortcutAction {
+    WavelengthBack,
+    WavelengthForward,
+    DelayBack,
+    DelayForward,
+    KeepWavelength,
+    KeepDelay,
+    FitTrace,
+    ResetViews,
 }
 
 /// The export formats, re-exported so the shell and the studio agree on one
@@ -171,6 +200,9 @@ pub struct Workspace {
     pub studio_plates: Vec<Plate>,
     /// Whether a data export writes the visible window or everything measured.
     pub studio_visible_only: bool,
+    /// Whether the workbench shows the columns a fit is set up with, or only
+    /// the values it produced.
+    pub fit_edit_parameters: bool,
     /// What the title bar currently says, so it is only set when it changes.
     window_title: String,
     /// Whether this dataset has a time-zero correction to show. The fourth
@@ -205,6 +237,7 @@ impl Workspace {
             current_plate: PlateId::Kinetics,
             studio_plates: Vec::new(),
             studio_visible_only: true,
+            fit_edit_parameters: true,
             window_title: String::new(),
             show_time_zero: false,
             show_time_zero_plate: false,
@@ -341,6 +374,97 @@ impl Workspace {
 
         self.rehome = false;
         self.built = self.revision;
+    }
+
+    /// Puts every plate back on the window it opened with: the four figure
+    /// plates, the comparison panes, the workbench and the studio preview. One
+    /// action for one idea — "show me everything again".
+    pub fn reset_all_views(&mut self) {
+        for plate in &self.plates {
+            plate.reset_view();
+        }
+        for plate in &self.compare_plates {
+            plate.reset_view();
+        }
+        for plate in &self.fit_plates {
+            plate.reset_view();
+        }
+        for plate in &self.studio_plates {
+            plate.reset_view();
+        }
+        self.session.status.info("every view is back to its full range");
+        self.touch();
+    }
+
+    /// Keeps the current wavelength on (b), or the delay on (c), from the
+    /// keyboard or the panel.
+    pub fn keep_current(&mut self, wavelength: bool) {
+        // Pinning is not the same as adding: the linked curve is already on the
+        // plate, so keeping it means it stays when the selection moves on.
+        let outcome = if wavelength {
+            self.session.save_current_trace()
+        } else {
+            self.session.save_current_spectrum()
+        };
+        match outcome {
+            Ok(()) => {
+                let count = if wavelength {
+                    self.session.comparison_wavelengths.len()
+                } else {
+                    self.session.comparison_delays.len()
+                };
+                self.session.status.info(format!(
+                    "kept on ({}) — {count} curve(s)",
+                    if wavelength { "b" } else { "c" }
+                ));
+                self.touch();
+            }
+            Err(error) => self.session.status.problem(format!("{error}")),
+        }
+    }
+
+    /// Steps the linked selection along an axis, which is what the arrow keys
+    /// do. `delta` is in measured samples, so a step is one measurement.
+    pub fn step_linked(&mut self, wavelength: bool, delta: isize) {
+        let Some(dataset) = self.session.dataset() else {
+            return;
+        };
+        let version = self.session.version.unwrap_or(dataset.active_version);
+        let Ok((wavelength_axis, delay_axis)) = dataset.axes(version) else {
+            return;
+        };
+        let (axis, wanted) = if wavelength {
+            (
+                &wavelength_axis,
+                self.session
+                    .trace
+                    .as_ref()
+                    .map(|trace| trace.wavelength.coordinate),
+            )
+        } else {
+            (
+                &delay_axis,
+                self.session
+                    .spectrum
+                    .as_ref()
+                    .map(|spectrum| spectrum.delay.coordinate),
+            )
+        };
+        let Some(wanted) = wanted else {
+            return;
+        };
+        let (index, _) = axis.nearest(wanted);
+        let next = (index as isize + delta).clamp(0, axis.len() as isize - 1) as usize;
+        let value = axis.values()[next];
+        let outcome = if wavelength {
+            self.session.select_wavelength(value)
+        } else {
+            self.session.select_delay(value)
+        };
+        if let Err(error) = outcome {
+            self.session.status.problem(format!("{error}"));
+        }
+        self.touch();
     }
 
     /// Seeds the comparison with what is loaded, for a window that opens
@@ -696,6 +820,38 @@ impl Workspace {
         self.touch();
     }
 
+    /// Registers the workspace's keys. Called once, before the window opens.
+    pub fn bind_shortcuts(cx: &mut App) {
+        use gpui_kit::KeyBinding;
+        cx.bind_keys([
+            // The arrows walk the two axes, one measured sample at a time.
+            KeyBinding::new("left", WavelengthBack, None),
+            KeyBinding::new("right", WavelengthForward, None),
+            KeyBinding::new("up", DelayBack, None),
+            KeyBinding::new("down", DelayForward, None),
+            KeyBinding::new("b", KeepWavelength, None),
+            KeyBinding::new("c", KeepDelay, None),
+            KeyBinding::new("f", FitTrace, None),
+            KeyBinding::new("0", ResetViews, None),
+        ]);
+    }
+
+    /// Where the key actions land. Each one moves the selection or opens a
+    /// workspace; none of them changes a number.
+    fn handle_shortcut(&mut self, action: &ShortcutAction, cx: &mut Context<Self>) {
+        match action {
+            ShortcutAction::WavelengthBack => self.step_linked(true, -1),
+            ShortcutAction::WavelengthForward => self.step_linked(true, 1),
+            ShortcutAction::DelayBack => self.step_linked(false, -1),
+            ShortcutAction::DelayForward => self.step_linked(false, 1),
+            ShortcutAction::KeepWavelength => self.keep_current(true),
+            ShortcutAction::KeepDelay => self.keep_current(false),
+            ShortcutAction::FitTrace => self.open_fit(),
+            ShortcutAction::ResetViews => self.reset_all_views(),
+        }
+        cx.notify();
+    }
+
     // -- the regions of the shell -----------------------------------------
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -973,17 +1129,19 @@ impl Workspace {
                                     .text_color(ink::text())
                                     .child(caption),
                             )
-                            // §17.1: the studio is reachable from every plot, so
-                            // the way in is on the plate rather than in a menu.
+                            // §17.1: every plate reaches the studio, so the way
+                            // in is on the plate rather than in a menu. The
+                            // controls say what they do: "studio" and "data"
+                            // named nothing a new user could act on.
                             .child(widgets::action_id(
-                                "studio",
+                                "FigureStudio",
                                 ElementId::Name(format!("studio-{letter}").into()),
                                 false,
                                 cx,
                                 move |workspace, _, _| workspace.open_studio(plate_id),
                             ))
                             .child(widgets::action_id(
-                                "data",
+                                "Export data",
                                 ElementId::Name(format!("data-{letter}").into()),
                                 false,
                                 cx,
@@ -993,7 +1151,7 @@ impl Workspace {
                             // itself, not behind a workspace switch.
                             .child(if plate_id == PlateId::Contour {
                                 widgets::action_id(
-                                    "glotaran",
+                                    "Glotaran input",
                                     ElementId::Name("glotaran-export".into()),
                                     false,
                                     cx,
@@ -1117,10 +1275,14 @@ impl Workspace {
         );
 
         div()
+            .id(ElementId::Name("inspector".into()))
             .w(px(INSPECTOR_WIDTH))
             .h_full()
             .flex()
             .flex_col()
+            // The panel is taller than a laptop window, so it scrolls rather
+            // than hiding its last rows below the edge.
+            .overflow_y_scroll()
             .bg(ink::ground())
             .border_l_1()
             .border_color(ink::rule())
@@ -1206,17 +1368,27 @@ impl Workspace {
                         }),
                     ),
             ))
-            .child(self.field(
-                "Window",
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(widgets::number_input(&half_width_state, 62.0))
-                    .child(widgets::readout("nm ±"))
-                    .child(widgets::number_input(&channels_state, 48.0))
-                    .child(widgets::readout("channels")),
-            ))
+            // The window fields are shown only when the reading averages over
+            // one: a control that cannot change the answer is noise.
+            .child(if matches!(
+                sampling.mode,
+                SampleMode::AverageWindow { .. } | SampleMode::AverageChannels { .. }
+            ) {
+                self.field(
+                    "Window",
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(widgets::number_input(&half_width_state, 62.0))
+                        .child(widgets::readout("nm ±"))
+                        .child(widgets::number_input(&channels_state, 48.0))
+                        .child(widgets::readout("channels")),
+                )
+                .into_any_element()
+            } else {
+                div().into_any_element()
+            })
             .child(self.kept_block(
                 "b",
                 "Kinetics",
@@ -1265,17 +1437,15 @@ impl Workspace {
                     .py_2()
                     .border_b_1()
                     .border_color(ink::hair())
-                    .child(widgets::small_caps("plates"))
                     .child(widgets::switch(
-                        "time-zero plate",
+                        "(d) time-zero plate",
                         self.show_time_zero_plate || self.show_time_zero,
                         cx,
                         |workspace| {
                             workspace.show_time_zero_plate = !workspace.show_time_zero_plate;
                             workspace.touch();
                         },
-                    ))
-                    .child(widgets::readout("(d) shows the correction curve")),
+                    )),
             )
             .child(
                 div()
@@ -1284,11 +1454,33 @@ impl Workspace {
                     .gap_2()
                     .p_3()
                     .child(self.inspector_action("Keep trace", cx, |workspace| {
-                        let _ = workspace.session.save_current_trace();
+                        match workspace.session.save_current_trace() {
+                            Ok(()) => {
+                                let kept = workspace.session.comparison_wavelengths.len();
+                                workspace.session.status.info(format!(
+                                    "the trace is now one of the {kept} curve(s) on (b)"
+                                ));
+                            }
+                            Err(error) => workspace
+                                .session
+                                .status
+                                .problem(format!("{error}")),
+                        }
                         workspace.touch();
                     }))
                     .child(self.inspector_action("Keep spectrum", cx, |workspace| {
-                        let _ = workspace.session.save_current_spectrum();
+                        match workspace.session.save_current_spectrum() {
+                            Ok(()) => {
+                                let kept = workspace.session.comparison_delays.len();
+                                workspace.session.status.info(format!(
+                                    "the spectrum is now one of the {kept} curve(s) on (c)"
+                                ));
+                            }
+                            Err(error) => workspace
+                                .session
+                                .status
+                                .problem(format!("{error}")),
+                        }
                         workspace.touch();
                     }))
                     .child(self.inspector_action("Fit this trace", cx, |workspace| {
@@ -1298,12 +1490,11 @@ impl Workspace {
                         let plate = workspace.current_plate;
                         workspace.open_studio(plate);
                     }))
-                    .child(self.inspector_action("Reset view", cx, |workspace| {
-                        for plate in &workspace.plates {
-                            plate.reset_view();
-                        }
+                    .child(self.inspector_action("Reset all views", cx, |workspace| {
+                        workspace.reset_all_views();
                     })),
             )
+            .child(self.shortcut_list())
     }
 
     /// One linked plate's selection: what is drawn, how to add another, and the
@@ -1477,6 +1668,39 @@ impl Workspace {
         self.touch();
     }
 
+    /// The keys, listed where a user looks when they are stuck. A shortcut
+    /// nobody can find is a shortcut nobody uses, so the list stays short and
+    /// sits in the panel rather than in a dialog.
+    fn shortcut_list(&self) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .border_t_1()
+            .border_color(ink::hair())
+            .child(widgets::small_caps("keys"))
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(ink::muted())
+                    .child("← →  wavelength   ↑ ↓  delay"),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(ink::muted())
+                    .child("B  keep on (b)   C  keep on (c)"),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(ink::muted())
+                    .child("F  fit this trace   0  reset views"),
+            )
+    }
+
     fn field(&self, label: &str, value: impl IntoElement) -> impl IntoElement {
         div()
             .flex()
@@ -1607,6 +1831,33 @@ impl Render for Workspace {
             .flex_col()
             .bg(ink::paper())
             .text_color(ink::text())
+            // The keyboard belongs to the workspace: the root element is what
+            // GPUI walks up from the focused node looking for a handler.
+            .key_context("SpectraStudio")
+            .on_action(cx.listener(|workspace, _: &WavelengthBack, _window, cx| {
+                workspace.handle_shortcut(&ShortcutAction::WavelengthBack, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &WavelengthForward, _window, cx| {
+                workspace.handle_shortcut(&ShortcutAction::WavelengthForward, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &DelayBack, _window, cx| {
+                workspace.handle_shortcut(&ShortcutAction::DelayBack, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &DelayForward, _window, cx| {
+                workspace.handle_shortcut(&ShortcutAction::DelayForward, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &KeepWavelength, _window, cx| {
+                workspace.handle_shortcut(&ShortcutAction::KeepWavelength, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &KeepDelay, _window, cx| {
+                workspace.handle_shortcut(&ShortcutAction::KeepDelay, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &FitTrace, _window, cx| {
+                workspace.handle_shortcut(&ShortcutAction::FitTrace, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &ResetViews, _window, cx| {
+                workspace.handle_shortcut(&ShortcutAction::ResetViews, cx);
+            }))
             .child(self.header(cx))
             .child(strip)
             .child(body)
@@ -1813,6 +2064,98 @@ mod tests {
     fn window_of(workspace: &Workspace, index: usize) -> ((f64, f64), (f64, f64)) {
         let state = workspace.plates[index].state.borrow();
         (state.x_range, state.y_range)
+    }
+
+    #[test]
+    fn the_arrow_keys_walk_the_two_axes_one_measured_sample_at_a_time() {
+        let mut workspace = workspace_with_dataset();
+        // The fixture's brightest row is the last one, so the walk starts at
+        // 650 nm and the useful direction is back.
+        let first = workspace.session.trace.as_ref().unwrap().wavelength.coordinate;
+        assert_eq!(first, 650.0);
+        workspace.step_linked(true, -1);
+        let second = workspace.session.trace.as_ref().unwrap().wavelength.coordinate;
+        assert_ne!(first, second, "a step moves the selection");
+        // The axis is 500, 550, 600, 650: one step is one measured sample, not
+        // one nanometre.
+        assert_eq!(second, 600.0);
+        // And the delay axis moves on its own: the trace does not follow.
+        let trace_before = workspace.session.trace.as_ref().unwrap().wavelength.coordinate;
+        workspace.step_linked(false, 1);
+        assert_eq!(
+            workspace.session.trace.as_ref().unwrap().wavelength.coordinate,
+            trace_before
+        );
+        // Stepping past either end stops there rather than wrapping.
+        for _ in 0..20 {
+            workspace.step_linked(true, -1);
+        }
+        assert_eq!(
+            workspace.session.trace.as_ref().unwrap().wavelength.coordinate,
+            500.0
+        );
+        for _ in 0..20 {
+            workspace.step_linked(true, 1);
+        }
+        assert_eq!(
+            workspace.session.trace.as_ref().unwrap().wavelength.coordinate,
+            650.0
+        );
+    }
+
+    #[test]
+    fn the_keep_keys_add_the_selection_and_say_so() {
+        let mut workspace = workspace_with_dataset();
+        assert!(workspace.session.comparison_wavelengths.is_empty());
+        workspace.keep_current(true);
+        assert_eq!(workspace.session.comparison_wavelengths.len(), 1);
+        assert!(workspace.session.status.message.contains("kept on (b)"));
+        // Keeping the same curve twice is harmless rather than an error: the
+        // key is idempotent, so a second press cannot fill the plate with
+        // copies of one trace.
+        workspace.keep_current(true);
+        assert_eq!(workspace.session.comparison_wavelengths.len(), 1);
+        assert!(workspace.session.status.problem.is_none());
+        // The delay axis keeps its own list. The default grid is already in it,
+        // so the check is that keeping adds the current sample to that list
+        // rather than replacing it.
+        let before = workspace.session.comparison_delays.len();
+        workspace.keep_current(false);
+        let current = workspace
+            .session
+            .spectrum
+            .as_ref()
+            .unwrap()
+            .delay
+            .coordinate;
+        assert!(workspace.session.comparison_delays.len() >= before);
+        assert!(
+            workspace
+                .session
+                .comparison_delays
+                .iter()
+                .any(|delay| (*delay - current).abs() < 1e-9),
+            "the linked delay should be in the kept list"
+        );
+    }
+
+    #[test]
+    fn one_action_puts_every_view_back() {
+        let mut workspace = workspace_with_dataset();
+        // Pan a figure plate and a comparison pane off the matrix they show,
+        // the way a drag would, without touching where "home" is.
+        {
+            let mut state = workspace.plates[0].state.borrow_mut();
+            state.x_range = (520.0, 620.0);
+            state.y_range = (-1.0, 5.0);
+        }
+        workspace.reset_all_views();
+        assert_eq!(window_of(&workspace, 0), ((500.0, 650.0), (-1.0, 10.0)));
+        for plate in &workspace.compare_plates {
+            let state = plate.state.borrow();
+            assert_eq!(state.x_range, state.home.0);
+        }
+        assert!(workspace.session.status.message.contains("full range"));
     }
 
     #[test]
