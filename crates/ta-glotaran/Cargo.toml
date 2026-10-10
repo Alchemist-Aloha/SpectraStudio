@@ -1,0 +1,10 @@
+[package]
+name = "ta-glotaran"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ta-core.workspace = true
+ta-io.workspace = true
+ndarray.workspace = true
+thiserror.workspace = true

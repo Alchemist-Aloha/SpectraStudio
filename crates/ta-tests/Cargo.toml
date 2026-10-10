@@ -1,0 +1,14 @@
+[package]
+name = "ta-tests"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ta-core.workspace = true
+ta-io.workspace = true
+ta-processing.workspace = true
+ta-fitting.workspace = true
+ta-glotaran.workspace = true
+ta-plot.workspace = true
+ndarray.workspace = true
+serde_json.workspace = true

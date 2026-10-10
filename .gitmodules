@@ -1,0 +1,3 @@
+[submodule "TA_Analyzer"]
+	path = TA_Analyzer
+	url = https://github.com/Alchemist-Aloha/TA_Analyzer.git

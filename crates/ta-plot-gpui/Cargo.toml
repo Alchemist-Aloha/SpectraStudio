@@ -1,0 +1,10 @@
+[package]
+name = "ta-plot-gpui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ta-core.workspace = true
+ta-plot.workspace = true
+gpui-kit.workspace = true
+image.workspace = true

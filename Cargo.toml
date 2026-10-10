@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ta-core",
+    "crates/ta-io",
+    "crates/ta-processing",
+    "crates/ta-fitting",
+    "crates/ta-glotaran",
+    "crates/ta-plot",
+    "crates/ta-plot-gpui",
+    "crates/ta-gui",
+    "crates/ta-tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+
+[workspace.dependencies]
+ta-core = { path = "crates/ta-core" }
+ta-io = { path = "crates/ta-io" }
+ta-processing = { path = "crates/ta-processing" }
+ta-fitting = { path = "crates/ta-fitting" }
+ta-glotaran = { path = "crates/ta-glotaran" }
+ta-plot = { path = "crates/ta-plot" }
+ta-plot-gpui = { path = "crates/ta-plot-gpui" }
+ta-tests = { path = "crates/ta-tests" }
+
+ndarray = { version = "0.16", features = ["rayon", "serde"] }
+rayon = "1.10"
+num-traits = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+image = { version = "0.25", default-features = false, features = ["png"] }
+plotters = { version = "0.3.7", default-features = false, features = [
+    "svg_backend",
+    "bitmap_backend",
+    "bitmap_encoder",
+    "bitmap_gif",
+    "line_series",
+    "area_series",
+    "point_series",
+    "ttf",
+] }
+gpui-kit = "0.7"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# Development keeps scientific math fast enough to be usable in tests.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

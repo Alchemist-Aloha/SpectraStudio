@@ -1,0 +1,22 @@
+[package]
+name = "ta-gui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "spectra-studio"
+path = "src/main.rs"
+
+[dependencies]
+ta-core.workspace = true
+ta-io.workspace = true
+ta-processing.workspace = true
+ta-fitting.workspace = true
+ta-glotaran.workspace = true
+ta-plot.workspace = true
+ta-plot-gpui.workspace = true
+gpui-kit.workspace = true
+ndarray.workspace = true
+
+[dev-dependencies]
+gpui-kit = { version = "0.7", features = ["test-support"] }

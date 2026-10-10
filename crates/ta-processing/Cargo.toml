@@ -1,0 +1,9 @@
+[package]
+name = "ta-processing"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ta-core.workspace = true
+ndarray.workspace = true
+thiserror.workspace = true

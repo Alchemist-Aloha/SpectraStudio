@@ -1,0 +1,11 @@
+# Impeccable's installed skills are environment, not project source.
+.agents/
+
+# Build and scratch output.
+/target/
+.build/
+
+# Impeccable session state that is machine-local.
+.impeccable/config.local.json
+.impeccable/mocks/
+.impeccable/review/
