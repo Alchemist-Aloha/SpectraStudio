@@ -10,10 +10,20 @@
 
 pub mod colormap;
 pub mod contour;
+pub mod export;
+pub mod render;
 pub mod scale;
+pub mod ticks;
 pub mod viewport;
 
 pub use colormap::{Raster, RasterKey, RasterRequest, RasterSampling};
 pub use contour::{band_rings, isolines, ContourGrid};
+pub use export::{
+    export, export_png, export_svg, figure_pixels, figure_points, ExportPanel,
+};
+pub use render::{
+    draw_panel,
+    dash_polyline, render_panel, HeatmapLayer, PanelLayout, PlottedSeries, Rect,
+};
 pub use scale::Scale;
 pub use viewport::PlotViewport;

@@ -19,11 +19,13 @@ fn nice_step(raw: f64) -> f64 {
     let exponent = raw.log10().floor();
     let magnitude = 10f64.powf(exponent);
     let normalised = raw / magnitude;
-    let factor = if normalised <= 1.0 {
+    // The nearest rung, not the next one up: a 2.24 step rounds to 2 so a span
+    // asks for the number of ticks it asked for.
+    let factor = if normalised < 1.5 {
         1.0
-    } else if normalised <= 2.0 {
+    } else if normalised < 3.0 {
         2.0
-    } else if normalised <= 5.0 {
+    } else if normalised < 7.0 {
         5.0
     } else {
         10.0
@@ -33,10 +35,10 @@ fn nice_step(raw: f64) -> f64 {
 
 /// Evenly spaced, human-readable ticks across a linear range.
 pub fn linear_ticks(low: f64, high: f64, target: usize) -> Vec<f64> {
-    let (low, high) = (low.min(high), low.max(high));
     if !(low.is_finite() && high.is_finite()) {
         return Vec::new();
     }
+    let (low, high) = (low.min(high), low.max(high));
     let target = target.max(2);
     let span = high - low;
     if span <= 0.0 {
@@ -60,57 +62,59 @@ pub fn linear_ticks(low: f64, high: f64, target: usize) -> Vec<f64> {
 /// or split axis actually needs: equal visual spacing means equal steps in the
 /// transformed coordinate.
 pub fn ticks_for_scale(scale: Scale, low: f64, high: f64, target: usize) -> Vec<f64> {
-    let Some((t_low, t_high)) = scale.forward_range(low, high) else {
-        return Vec::new();
-    };
-    let mut physical: Vec<f64> = match scale {
-        // A logarithmic axis wants its decades, not 1-2-5 steps.
-        Scale::Logarithmic => decades(t_low, t_high)
-            .into_iter()
-            .map(|t| scale.inverse(t))
-            .collect(),
-        _ => {
-            // A split axis is two different regimes, so each side gets the tick
-            // generator that suits it and the round numbers stay round.
-            if let Scale::SplitLinearLog { break_at } = scale {
-                let mut ticks = linear_ticks(low.min(break_at), break_at, target);
-                for decade in decades(break_at.ln(), t_high) {
-                    ticks.push(scale.inverse(decade));
-                }
-                ticks.retain(|value| *value >= low.min(high) && *value <= low.max(high));
-                ticks.sort_by(f64::total_cmp);
-                ticks.dedup_by(|a, b| (*a - *b).abs() <= b.abs() * 1e-12 + 1e-300);
-                return ticks;
-            }
-            linear_ticks(t_low, t_high, target)
-                .into_iter()
-                .map(|t| scale.inverse(t))
-                .collect()
-        }
-    };
-    physical.retain(|value| *value >= low.min(high) && *value <= low.max(high));
-    physical.sort_by(f64::total_cmp);
-    physical.dedup_by(|a, b| (*a - *b).abs() <= b.abs() * 1e-12 + 1e-300);
-    physical
-}
-
-/// Log decades inside a layout range, rounded to integers.
-fn decades(low: f64, high: f64) -> Vec<f64> {
-    let (low, high) = (low.min(high), low.max(high));
     if !(low.is_finite() && high.is_finite()) {
         return Vec::new();
     }
-    let first = low.ceil();
-    let last = high.floor();
+    let (low, high) = (low.min(high), low.max(high));
+    let Some((t_low, t_high)) = scale.forward_range(low, high) else {
+        return Vec::new();
+    };
+
+    let mut ticks: Vec<f64> = match scale {
+        // A logarithmic axis wants its decades: 1, 10, 100, not 1-2-5 steps.
+        Scale::Logarithmic => decades_between(low, high),
+        // A split axis is two regimes, and each side gets the generator that
+        // suits it, so the round numbers stay round on both sides of the break.
+        Scale::SplitLinearLog { break_at } => {
+            let mut ticks = linear_ticks(low, break_at.min(high), target);
+            ticks.extend(decades_between(break_at.max(low), high));
+            ticks
+        }
+        // Linear, and the linear part of a symmetric-logarithmic axis, are laid
+        // out in layout space so a symlog axis gets evenly spaced ticks.
+        _ => linear_ticks(t_low, t_high, target)
+            .into_iter()
+            .map(|t| scale.inverse(t))
+            .collect(),
+    };
+
+    ticks.retain(|value| *value >= low && *value <= high);
+    ticks.sort_by(f64::total_cmp);
+    ticks.dedup_by(|a, b| (*a - *b).abs() <= b.abs() * 1e-12 + 1e-300);
+    ticks
+}
+
+/// Physical powers of ten inside a range, with a layout-space fallback when the
+/// range is narrower than one decade.
+fn decades_between(low: f64, high: f64) -> Vec<f64> {
+    let low = low.max(f64::MIN_POSITIVE);
+    if high <= low {
+        return Vec::new();
+    }
+    let first = low.log10().ceil();
+    let last = high.log10().floor();
     if last < first {
-        // Less than one decade visible: fall back to a linear split of the
-        // layout span, which keeps the labels meaningful.
-        return linear_ticks(low, high, 4);
+        // Less than one decade visible: divide the logarithmic span evenly, so
+        // the axis is not left with no ticks at all.
+        return linear_ticks(low.ln(), high.ln(), 4)
+            .into_iter()
+            .map(f64::exp)
+            .collect();
     }
     let mut ticks = Vec::new();
     let mut exponent = first;
     while exponent <= last && ticks.len() < 512 {
-        ticks.push(exponent);
+        ticks.push(10f64.powf(exponent));
         exponent += 1.0;
     }
     ticks
@@ -162,8 +166,8 @@ mod tests {
         assert_eq!(nice_step(1.5), 2.0);
         assert_eq!(nice_step(3.0), 5.0);
         assert_eq!(nice_step(7.0), 10.0);
-        assert_eq!(nice_step(0.023), 0.02 + 1e-12 - 1e-12);
-        assert!(nice_step(0.023) > 0.019 && nice_step(0.023) < 0.026);
+        assert_eq!(nice_step(0.023), 0.02);
+        assert_eq!(nice_step(2.24), 2.0);
     }
 
     #[test]
@@ -214,9 +218,12 @@ mod tests {
     fn a_split_axis_keeps_round_numbers_below_the_break() {
         let scale = Scale::SplitLinearLog { break_at: 10.0 };
         let ticks = ticks_for_scale(scale, 0.0, 1000.0, 5);
-        assert!(ticks.contains(&5.0), "ticks below the break: {ticks:?}");
+        // Round numbers below the break ...
+        assert!(ticks.contains(&2.0), "ticks below the break: {ticks:?}");
         assert!(ticks.contains(&10.0));
+        // ... and decades above it.
         assert!(ticks.contains(&100.0), "decades above the break: {ticks:?}");
+        assert!(ticks.contains(&1000.0));
         assert!(ticks.windows(2).all(|pair| pair[0] < pair[1]));
     }
 

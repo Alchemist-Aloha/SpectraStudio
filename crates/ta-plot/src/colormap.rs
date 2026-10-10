@@ -13,7 +13,7 @@
 //!   is how filled contour levels are drawn without one primitive per cell.
 
 use crate::contour::ContourGrid;
-use ta_core::{Axis, ColorLimits, Colormap, DatasetId, Rgba, VersionId};
+use ta_core::{ColorLimits, Colormap, DatasetId, Rgba, VersionId};
 
 /// How a matrix sample becomes a pixel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -365,7 +365,7 @@ mod tests {
     use super::*;
     use crate::contour::ContourGrid;
     use ndarray::Array2;
-    use ta_core::{AutoRange, AxisKind, AxisUnit};
+    use ta_core::{AutoRange, Axis, AxisKind, AxisUnit};
 
     fn axes(nx: usize, ny: usize) -> (Axis, Axis) {
         (
