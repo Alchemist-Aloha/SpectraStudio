@@ -152,7 +152,14 @@ impl Colormap {
                 (0.75, [94, 201, 98]),
                 (1.0, [253, 231, 37]),
             ],
-            "grey" => &[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])],
+            "magma" => &[
+                (0.0, [0, 0, 4]),
+                (0.25, [81, 18, 124]),
+                (0.5, [183, 55, 121]),
+                (0.75, [251, 136, 97]),
+                (1.0, [252, 253, 191]),
+            ],
+            "grey" | "grayscale" => &[(0.0, [0, 0, 0]), (1.0, [255, 255, 255])],
             _ => return None,
         };
         Some(Self::new(
@@ -169,7 +176,7 @@ impl Colormap {
 
     /// The names offered in the contour inspector, in menu order.
     pub const PRESETS: &'static [&'static str] =
-        &["coolwarm", "bwr", "seismic", "viridis", "grey"];
+        &["coolwarm", "bwr", "seismic", "viridis", "magma", "grey"];
 
     /// The stops in the order they are drawn, honouring `reversed`.
     pub fn effective_stops(&self) -> Vec<ColorStop> {

@@ -104,7 +104,8 @@ gpui_kit::actions!(
         KeepWavelength,
         KeepDelay,
         FitTrace,
-        ResetViews
+        ResetViews,
+        SaveProject
     ]
 );
 
@@ -214,6 +215,9 @@ pub struct Workspace {
     /// Set when the user asks for the fourth plate without a correction to put
     /// in it, so the empty axis can still be studied.
     show_time_zero_plate: bool,
+    pub show_index: bool,
+    pub show_inspector: bool,
+    focus: Option<gpui_kit::FocusHandle>,
 }
 
 impl Workspace {
@@ -231,6 +235,9 @@ impl Workspace {
             contour_key: None,
             rehome: true,
             layout: Layout::Figure,
+            show_index: true,
+            show_inspector: true,
+            focus: None,
             compare_plates: Vec::new(),
             compare_target: crate::compare::SeriesTarget::Trace,
             fit_plates: Vec::new(),
@@ -354,11 +361,7 @@ impl Workspace {
                 let size = ta_plot::export::figure_points(&figure);
                 // A contour preview needs the matrix as well as its isolines:
                 // without it the field is a blank page with outlines on it.
-                let heatmap = if self.current_plate == PlateId::Contour {
-                    self.contour_source.clone()
-                } else {
-                    None
-                };
+                let heatmap = self.studio_contour_source();
                 let scene = scene_at_size(
                     content,
                     figure.style.clone(),
@@ -367,7 +370,16 @@ impl Workspace {
                     false,
                     Some(size),
                 );
+                let page_view = self.studio_plates.first().map(|plate| {
+                    let state = plate.state.borrow();
+                    (state.image_zoom, state.image_offset)
+                });
                 sync_plate(&mut self.studio_plates, 0, scene, raster.clone(), true);
+                if let (Some((zoom, offset)), Some(plate)) = (page_view, self.studio_plates.first()) {
+                    let mut state = plate.state.borrow_mut();
+                    state.image_zoom = zoom;
+                    state.image_offset = offset;
+                }
                 if let Some(zoom) = self.pending_page_zoom.take() {
                     if let Some(plate) = self.studio_plates.first() {
                         plate.state.borrow_mut().image_zoom = zoom;
@@ -702,6 +714,17 @@ impl Workspace {
     /// falls through to the second rather than being reported as fatal — a file
     /// that is not a sheet is usually the other shape.
     pub fn open_path(&mut self, path: &std::path::Path) {
+        if path.extension().is_some_and(|extension| extension == "taproject") {
+            match self.session.load_project(path) {
+                Ok(()) => {
+                    self.restore_workspace();
+                    self.fields = widgets::Fields::default();
+                    self.touch_matrix();
+                }
+                Err(error) => self.session.status.problem(format!("{error}")),
+            }
+            return;
+        }
         let sheet = ta_io::import_ta_sheet(path, ta_io::Units::default());
         match sheet {
             Ok(dataset) => {
@@ -727,11 +750,70 @@ impl Workspace {
                         )),
                     }
                 }
-                None => self
-                    .session
-                    .status
-                    .problem(format!("cannot read {}: {sheet_error}", path.display())),
+                None => self.session.status.problem(format!(
+                    "Cannot import {}: {sheet_error}. For a plain matrix, put matching <matrix>_tawavelength and <matrix>_tatime files beside it, or import a TA sheet with axes.",
+                    path.display()
+                )),
             },
+        }
+    }
+
+    fn save_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.record_workspace();
+        if let Some(path) = self.session.path.clone() {
+            if let Err(error) = self.session.save_project(&path) {
+                self.session.status.problem(format!("{error}"));
+            }
+            return;
+        }
+        let directory = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
+        let receiver = cx.prompt_for_new_path(&directory, Some("Untitled.taproject"));
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = receiver.await;
+            let _ = this.update_in(cx, |workspace, _, cx| {
+                match answer {
+                    Ok(Ok(Some(path))) => {
+                        workspace.record_workspace();
+                        if let Err(error) = workspace.session.save_project(&path) {
+                            workspace.session.status.problem(format!("{error}"));
+                        }
+                    }
+                    Ok(Ok(None)) => workspace.session.status.info("save cancelled; your work is still open"),
+                    Ok(Err(error)) => workspace.session.status.problem(format!("cannot open the save dialog: {error}")),
+                    Err(_) => workspace.session.status.problem("save dialog closed; your work is still open"),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    fn record_workspace(&mut self) {
+        let layout = self.session.project.layout.get_or_insert_with(|| serde_json::json!({}));
+        if !layout.is_object() {
+            *layout = serde_json::json!({});
+        }
+        layout["workspace"] = serde_json::json!({
+            "layout": self.layout.label(),
+            "index": self.show_index,
+            "inspector": self.show_inspector,
+            "plate": self.current_plate.letter(),
+        });
+    }
+
+    pub fn restore_workspace(&mut self) {
+        if let Some(view) = self.session.project.layout.as_ref().and_then(|layout| layout.get("workspace")) {
+            self.layout = Layout::ALL.into_iter()
+                .find(|layout| Some(layout.label()) == view.get("layout").and_then(|value| value.as_str()))
+                .unwrap_or(Layout::Figure);
+            self.show_index = view.get("index").and_then(|value| value.as_bool()).unwrap_or(true);
+            self.show_inspector = view.get("inspector").and_then(|value| value.as_bool()).unwrap_or(true);
+            self.current_plate = PlateId::ALL.into_iter()
+                .find(|plate| Some(plate.letter()) == view.get("plate").and_then(|value| value.as_str()))
+                .unwrap_or(PlateId::Kinetics);
+        } else {
+            self.layout = Layout::Figure;
+            self.show_index = true;
+            self.show_inspector = true;
         }
     }
 
@@ -751,6 +833,9 @@ impl Workspace {
                             let result = workspace.session.load_project(path);
                             if let Err(error) = result {
                                 workspace.session.status.problem(format!("{error}"));
+                            } else {
+                                workspace.restore_workspace();
+                                workspace.fields = widgets::Fields::default();
                             }
                             workspace.touch_matrix();
                         }
@@ -771,59 +856,6 @@ impl Workspace {
         .detach();
     }
 
-    /// Exports the kinetics plate as an SVG at its recorded physical size.
-    fn export_figure(&mut self) {
-        let plate = PlateId::Kinetics;
-        let spec = plates::contour_spec(&self.session);
-        let content = plates::content(&self.session, plate, &spec);
-        let figure = plates::export_figure(&self.session, plate, &spec);
-        let directory = self
-            .session
-            .path
-            .as_ref()
-            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
-            .unwrap_or_else(std::env::temp_dir);
-        let path = directory.join(format!("spectra-studio-{}.svg", plate.letter()));
-        // The image is made at the size the exported figure will use, because
-        // Plotters blits a bitmap one pixel per pixel.
-        let series = content.series.clone();
-        let mut panels = vec![ta_plot::export::ExportPanel::new(0, series.clone())];
-        if let Some(source) = &self.contour_source {
-            let (figure_width, figure_height) = ta_plot::export::figure_points(&figure);
-            let x_scale = ta_plot::Scale::new(figure.panels[0].x.scale).unwrap_or_default();
-            let y_scale = ta_plot::Scale::new(figure.panels[0].y.scale).unwrap_or_default();
-            let layout = ta_plot::PanelLayout::compute(
-                &figure.panels[0],
-                &figure.style,
-                x_scale,
-                y_scale,
-                figure.panels[0].x.range.unwrap_or((0.0, 1.0)),
-                figure.panels[0].y.range.unwrap_or((0.0, 1.0)),
-                (figure_width, figure_height),
-            );
-            let (plot_width, plot_height) = layout.plot_size();
-            if let Some(layer) = source.layer(
-                &mut self.raster.borrow_mut(),
-                (
-                    plot_width.round().max(2.0) as u32,
-                    plot_height.round().max(2.0) as u32,
-                ),
-                state_window(&self.plates, 0).0,
-                state_window(&self.plates, 0).1,
-            ) {
-                panels = vec![ta_plot::export::ExportPanel::new(0, series)
-                    .with_heatmap((*layer).clone())];
-            }
-        }
-        match ta_plot::export::export_svg(&figure, panels, &path) {
-            Ok(()) => self
-                .session
-                .status
-                .info(format!("exported {}", path.display())),
-            Err(error) => self.session.status.problem(format!("{error}")),
-        }
-    }
-
     fn set_sampling(&mut self, sampling: Sampling) {
         self.session.set_sampling(sampling);
         self.touch();
@@ -834,14 +866,16 @@ impl Workspace {
         use gpui_kit::KeyBinding;
         cx.bind_keys([
             // The arrows walk the two axes, one measured sample at a time.
-            KeyBinding::new("left", WavelengthBack, None),
-            KeyBinding::new("right", WavelengthForward, None),
-            KeyBinding::new("up", DelayBack, None),
-            KeyBinding::new("down", DelayForward, None),
-            KeyBinding::new("b", KeepWavelength, None),
-            KeyBinding::new("c", KeepDelay, None),
-            KeyBinding::new("f", FitTrace, None),
-            KeyBinding::new("0", ResetViews, None),
+            KeyBinding::new("left", WavelengthBack, Some("SpectraStudio && !Input")),
+            KeyBinding::new("right", WavelengthForward, Some("SpectraStudio && !Input")),
+            KeyBinding::new("up", DelayBack, Some("SpectraStudio && !Input")),
+            KeyBinding::new("down", DelayForward, Some("SpectraStudio && !Input")),
+            KeyBinding::new("b", KeepWavelength, Some("SpectraStudio && !Input")),
+            KeyBinding::new("c", KeepDelay, Some("SpectraStudio && !Input")),
+            KeyBinding::new("f", FitTrace, Some("SpectraStudio && !Input")),
+            KeyBinding::new("0", ResetViews, Some("SpectraStudio && !Input")),
+            KeyBinding::new("ctrl-s", SaveProject, Some("SpectraStudio")),
+            KeyBinding::new("cmd-s", SaveProject, Some("SpectraStudio")),
         ]);
     }
 
@@ -902,20 +936,19 @@ impl Workspace {
                     .child(self.action("Open project…", false, cx, |workspace, window, cx| {
                         workspace.open_project(window, cx);
                     }))
-                    .child(self.action("Save project", false, cx, |workspace, _, _| {
-                        if let Some(path) = workspace.session.path.clone() {
-                            let result = workspace.session.save_project(&path);
-                            if let Err(error) = result {
-                                workspace.session.status.problem(format!("{error}"));
-                            }
-                            workspace.touch();
-                        } else {
-                            workspace.session.status.problem("no project path yet");
-                        }
+                    .child(self.action("Save project", false, cx, |workspace, window, cx| {
+                        workspace.save_project(window, cx);
                     }))
                     .child(self.action("Export figure…", false, cx, |workspace, _, _| {
-                        workspace.export_figure();
-                        workspace.touch();
+                        if workspace.layout == Layout::Studio {
+                            let format = workspace.studio_figure().map(|figure| figure.export.format)
+                                .unwrap_or(ExportFormat::Svg);
+                            workspace.export_studio(format);
+                        } else if workspace.layout == Layout::Compare {
+                            workspace.open_comparison_studio(workspace.current_plate == PlateId::Spectra);
+                        } else {
+                            workspace.open_studio(workspace.current_plate);
+                        }
                     })),
             )
     }
@@ -930,17 +963,24 @@ impl Workspace {
     ) -> impl IntoElement {
         let color = if accent { ink::accent() } else { ink::text() };
         let run = std::rc::Rc::new(run);
-        div()
-            .id(ElementId::Name(label.into()))
+        gpui_kit::base::Button::new(ElementId::Name(label.into()))
+            .accessibility_label(label)
+            .cursor_pointer()
+            .flex_shrink_0()
+            .h(px(24.0))
+            .px_1()
             .text_size(px(12.5))
             .text_color(color)
             .border_b_1()
             .border_color(if accent { ink::accent() } else { ink::rule() })
             .pb(px(1.0))
-            .hover(move |style| style.text_color(ink::accent()))
+            .hover(move |style| style.text_color(ink::accent()).bg(ink::paper()))
+            .focus(|style| style.border_b_2().border_color(ink::accent()).bg(ink::paper()))
             .child(label)
             .on_click(cx.listener(move |workspace, _event, window, cx| {
                 run(workspace, window, cx);
+                workspace.touch();
+                workspace.sync_studio_fields(window, cx);
                 cx.notify();
             }))
     }
@@ -1048,12 +1088,10 @@ impl Workspace {
         } else {
             dataset.clone().unwrap_or_else(|| "no dataset".to_string())
         };
-        let second_label = if many {
-            "versions".to_string()
-        } else {
-            "processing chain".to_string()
-        };
+        let second_label = "versions — click to restore".to_string();
         div()
+            .id(ElementId::Name("dataset-index".into()))
+            .overflow_y_scroll()
             .w(px(INDEX_WIDTH))
             .h_full()
             .flex()
@@ -1090,7 +1128,6 @@ impl Workspace {
 
     fn plate_block(&mut self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let plate_id = PlateId::ALL[index];
-        self.current_plate = plate_id;
         let caption = self.caption_of[index].clone();
         let letter = plate_id.letter().to_string();
         let plate = &self.plates[index];
@@ -1102,6 +1139,11 @@ impl Workspace {
                     return;
                 };
                 view.update(cx, |workspace, cx| {
+                    if matches!(gesture, PlotGesture::Select { .. } | PlotGesture::Region { .. }) {
+                        if let Some(focus) = &workspace.focus {
+                            focus.focus(_window, cx);
+                        }
+                    }
                     workspace.apply_gesture(plate_id, gesture);
                     cx.notify();
                 });
@@ -1118,6 +1160,9 @@ impl Workspace {
                     .py_1()
                     .border_t_1()
                     .border_color(ink::hair())
+                    .flex()
+                    .flex_col()
+                    .gap_1()
                     .child(
                         div()
                             .flex()
@@ -1137,7 +1182,14 @@ impl Workspace {
                                     .text_size(px(11.0))
                                     .text_color(ink::text())
                                     .child(caption),
-                            )
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .justify_end()
+                            .gap_2()
                             // §17.1: every plate reaches the studio, so the way
                             // in is on the plate rather than in a menu. The
                             // controls say what they do: "studio" and "data"
@@ -1171,12 +1223,16 @@ impl Workspace {
                                 div().into_any_element()
                             }),
                     )
-                    .h(px(CAPTION_HEIGHT)),
+                    .min_h(px(CAPTION_HEIGHT))
+                    .flex_shrink_0(),
             )
     }
 
     /// Applies a gesture from a plate to the session.
     fn apply_gesture(&mut self, plate: PlateId, gesture: PlotGesture) {
+        if matches!(gesture, PlotGesture::Select { .. } | PlotGesture::Region { .. }) {
+            self.current_plate = plate;
+        }
         match gesture {
             PlotGesture::Select { data, .. } => {
                 let result = match plate {
@@ -1690,6 +1746,7 @@ impl Workspace {
             .border_t_1()
             .border_color(ink::hair())
             .child(widgets::small_caps("keys"))
+            .child(widgets::readout("Ctrl/Cmd+S  save project"))
             .child(
                 div()
                     .text_size(px(11.0))
@@ -1814,6 +1871,11 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus = self.focus.get_or_insert_with(|| {
+            let focus = cx.focus_handle();
+            focus.focus(_window, cx);
+            focus
+        }).clone();
         if self.built != self.revision {
             self.refresh_scenes();
         }
@@ -1842,6 +1904,7 @@ impl Render for Workspace {
             .text_color(ink::text())
             // The keyboard belongs to the workspace: the root element is what
             // GPUI walks up from the focused node looking for a handler.
+            .track_focus(&focus)
             .key_context("SpectraStudio")
             .on_action(cx.listener(|workspace, _: &WavelengthBack, _window, cx| {
                 workspace.handle_shortcut(&ShortcutAction::WavelengthBack, cx);
@@ -1866,6 +1929,10 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|workspace, _: &ResetViews, _window, cx| {
                 workspace.handle_shortcut(&ShortcutAction::ResetViews, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &SaveProject, window, cx| {
+                workspace.save_project(window, cx);
+                cx.notify();
             }))
             .child(self.header(cx))
             .child(strip)
@@ -1903,9 +1970,17 @@ impl Workspace {
             .min_h(px(0.0))
             .w_full()
             .flex()
-            .child(self.plate_index(cx))
+            .child(if self.show_index {
+                self.plate_index(cx).into_any_element()
+            } else {
+                div().into_any_element()
+            })
             .child(div().flex_1().min_w(px(0.0)).child(block))
-            .child(inspector)
+            .child(if self.show_inspector {
+                inspector.into_any_element()
+            } else {
+                div().into_any_element()
+            })
             .into_any_element()
     }
 }
@@ -1977,17 +2052,6 @@ fn sync_plate(
     }
 }
 
-/// A plate's current window.
-fn state_window(plates: &[Plate], index: usize) -> ((f64, f64), (f64, f64)) {
-    match plates.get(index) {
-        Some(plate) => {
-            let state = plate.state.borrow();
-            (state.x_range, state.y_range)
-        }
-        None => ((0.0, 1.0), (0.0, 1.0)),
-    }
-}
-
 /// The default window of a plate: the whole range of the panel, or a unit box
 /// when nothing is loaded.
 fn default_ranges(panel: &ta_core::PanelModel) -> ((f64, f64), (f64, f64)) {
@@ -2003,14 +2067,15 @@ fn stacked_axes(
 ) -> Option<(PathBuf, PathBuf, PathBuf)> {
     let stem = matrix.file_name()?.to_string_lossy().to_string();
     let directory = matrix.parent()?;
+    let base = stem.strip_suffix("_tcorr").unwrap_or(&stem);
     let candidates = [
         (
             directory.join(format!("{stem}_tawavelength")),
             directory.join(format!("{stem}_tatime")),
         ),
         (
-            directory.join("NIR800_tawavelength"),
-            directory.join("NIR800_tatime"),
+            directory.join(format!("{base}_tawavelength")),
+            directory.join(format!("{base}_tatime")),
         ),
     ];
     for (wavelength, delay) in candidates {
@@ -2074,6 +2139,200 @@ mod tests {
     fn window_of(workspace: &Workspace, index: usize) -> ((f64, f64), (f64, f64)) {
         let state = workspace.plates[index].state.borrow();
         (state.x_range, state.y_range)
+    }
+
+    #[test]
+    fn studio_zoom_and_pan_survive_control_refreshes() {
+        let mut workspace = workspace_with_dataset();
+        workspace.open_studio(PlateId::Kinetics);
+        workspace.refresh_scenes();
+        workspace.zoom_preview(1.2);
+        workspace.refresh_scenes();
+        assert!((workspace.studio_plates[0].state.borrow().image_zoom - 1.2).abs() < 1e-5);
+        workspace.studio_plates[0].state.borrow_mut().image_offset = (15.0, -8.0);
+        workspace.apply_style_preset("Presentation");
+        workspace.refresh_scenes();
+        let state = workspace.studio_plates[0].state.borrow();
+        assert!((state.image_zoom - 1.2).abs() < 1e-5);
+        assert_eq!(state.image_offset, (15.0, -8.0));
+        drop(state);
+        workspace.fit_preview();
+        workspace.refresh_scenes();
+        assert_eq!(workspace.studio_plates[0].state.borrow().image_zoom, 1.0);
+        assert_eq!(workspace.studio_plates[0].state.borrow().image_offset, (0.0, 0.0));
+    }
+
+    #[test]
+    fn studio_auto_ranges_and_cropped_exports_use_the_displayed_figure() {
+        let mut workspace = workspace_with_dataset();
+        workspace.open_studio(PlateId::Kinetics);
+        workspace.edit_axis(true, |axis| axis.range = None);
+        workspace.refresh_scenes();
+        let range = workspace.studio_plates[0].scene.panel.x.range.unwrap();
+        assert!(range.0 <= -1.0 && range.1 >= 10.0);
+        let directory = std::env::temp_dir().join(format!("studio-controls-{}", ta_core::DatasetId::new()));
+        std::fs::create_dir_all(&directory).unwrap();
+        workspace.session.path = Some(directory.join("test.taproject"));
+        workspace.session.studio.as_mut().unwrap().title = "controls".into();
+        workspace.edit_axis(true, |axis| axis.range = Some((0.0, 1.0)));
+        workspace.refresh_scenes();
+        workspace.export_studio(ExportFormat::Svg);
+        assert!(workspace.session.status.problem.is_none(), "{}", workspace.session.status.message);
+        let svg = std::fs::read_to_string(directory.join("controls.svg")).unwrap();
+        assert!(svg.contains("<svg"));
+        workspace.export_studio(ExportFormat::Png);
+        assert!(workspace.session.status.problem.is_none(), "{}", workspace.session.status.message);
+        assert_eq!(&std::fs::read(directory.join("controls.png")).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn studio_visibility_and_layer_order_reach_the_preview() {
+        let mut workspace = workspace_with_dataset();
+        workspace.keep_current(true);
+        workspace.step_linked(true, -1);
+        workspace.open_studio(PlateId::Kinetics);
+        workspace.refresh_scenes();
+        let second = workspace.session.studio.as_ref().unwrap().panels[0].series[1].id;
+        workspace.move_series(0, 1);
+        workspace.refresh_scenes();
+        assert_eq!(workspace.session.studio.as_ref().unwrap().panels[0].draw_order()[0].id, second);
+        for series in &mut workspace.session.studio.as_mut().unwrap().panels[0].series {
+            series.visible = false;
+        }
+        workspace.touch();
+        workspace.refresh_scenes();
+        assert!(workspace.studio_plates[0].scene.series.is_empty());
+        assert!(workspace.studio_preview().unwrap().series.is_empty());
+    }
+
+    #[test]
+    fn studio_style_marker_kind_and_axis_controls_rebuild_scenes_without_editing_data() {
+        let mut workspace = workspace_with_dataset();
+        let version = workspace.session.version.unwrap();
+        let original = workspace.session.dataset().unwrap().matrix(version).unwrap().clone();
+        workspace.open_studio(PlateId::Kinetics);
+        let id = workspace.session.studio.as_ref().unwrap().panels[0].series[0].id;
+        for (name, style) in crate::studio::style_presets() {
+            workspace.apply_style_preset(name);
+            workspace.refresh_scenes();
+            let scene = &workspace.studio_plates[0].scene;
+            assert_eq!(scene.style.font_family, style.font_family);
+            assert_eq!(scene.panel.x.tick_label_size, style.tick_label_size);
+            assert_eq!(scene.series[0].style.width, style.series_width);
+        }
+        for color in crate::studio::series_colors() {
+            workspace.edit_series(id, |series| series.style.color = color);
+            workspace.refresh_scenes();
+            assert_eq!(workspace.studio_plates[0].scene.series[0].style.color, color);
+        }
+        for (_, dash) in crate::studio::dashes() {
+            workspace.edit_series(id, |series| series.style.dash = dash);
+            workspace.refresh_scenes();
+            assert_eq!(workspace.studio_plates[0].scene.series[0].style.dash, dash);
+        }
+        for (_, marker) in crate::studio::markers() {
+            workspace.set_series_marker(id, marker);
+            workspace.refresh_scenes();
+            assert_eq!(workspace.studio_plates[0].scene.series[0].style.marker, marker);
+        }
+        for (_, kind) in crate::studio::kinds() {
+            workspace.set_series_kind(id, kind);
+            workspace.refresh_scenes();
+            assert_eq!(workspace.studio_plates[0].scene.series[0].kind, kind);
+            if matches!(kind, ta_core::SeriesKind::Markers | ta_core::SeriesKind::Scatter | ta_core::SeriesKind::LineMarkers) {
+                assert_ne!(workspace.studio_plates[0].scene.series[0].style.marker, ta_core::MarkerShape::None);
+            }
+        }
+        workspace.edit_axis(false, |axis| { axis.grid = true; axis.reversed = true; });
+        workspace.refresh_scenes();
+        assert!(workspace.studio_plates[0].scene.panel.y.reversed);
+        assert!(workspace.studio_plates[0].scene.style.grid);
+        assert_eq!(&original, workspace.session.dataset().unwrap().matrix(version).unwrap());
+    }
+
+    #[test]
+    fn studio_contour_controls_use_the_edited_spec_not_the_bench_spec() {
+        let mut workspace = workspace_with_dataset();
+        workspace.open_studio(PlateId::Contour);
+        workspace.refresh_scenes();
+        for name in ["coolwarm", "viridis", "magma", "grayscale"] {
+            workspace.edit_contour(|spec| spec.colormap = ta_core::Colormap::preset(name).unwrap());
+            workspace.refresh_scenes();
+            let scene = &workspace.studio_plates[0].scene;
+            assert_eq!(scene.heatmap.as_ref().unwrap().spec.colormap.name, name);
+        }
+        workspace.edit_contour(|spec| {
+            spec.show_lines = false;
+            spec.limits.min = -0.02;
+            spec.limits.max = 0.02;
+            spec.level_count = 6;
+        });
+        workspace.refresh_scenes();
+        assert!(workspace.studio_plates[0].scene.series.is_empty());
+        let spec = &workspace.studio_plates[0].scene.heatmap.as_ref().unwrap().spec;
+        assert_eq!((spec.limits.min, spec.limits.max, spec.level_count), (-0.02, 0.02, 6));
+    }
+
+    #[test]
+    fn marking_the_selection_uses_the_axis_of_the_opened_plate() {
+        let mut workspace = workspace_with_dataset();
+        for plate in [PlateId::Kinetics, PlateId::Spectra, PlateId::Contour] {
+            workspace.open_studio(plate);
+            workspace.mark_selection();
+            workspace.refresh_scenes();
+            let annotation = workspace.studio_plates[0].scene.panel.annotations.last().unwrap();
+            match plate {
+                PlateId::Spectra => assert_eq!(annotation.x, Some(650.0)),
+                PlateId::Contour => { assert!(annotation.x.is_none()); assert!(annotation.y.is_some()); },
+                _ => { assert!(annotation.x.is_some()); assert!(annotation.y.is_none()); }
+            }
+        }
+    }
+
+    #[test]
+    fn axis_discovery_never_borrows_an_unrelated_experiments_axes() {
+        let directory = std::env::temp_dir().join(format!("spectra-axes-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        for name in ["NIR800_tawavelength", "NIR800_tatime", "sample_tawavelength", "sample_tatime"] {
+            std::fs::write(directory.join(name), "0").unwrap();
+        }
+        assert!(stacked_axes(&directory.join("unrelated")).is_none());
+        let (_, wavelength, delay) = stacked_axes(&directory.join("sample_tcorr")).unwrap();
+        assert_eq!(wavelength, directory.join("sample_tawavelength"));
+        assert_eq!(delay, directory.join("sample_tatime"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_workspace_and_panel_choices_survive_reopening() {
+        let mut workspace = workspace_with_dataset();
+        workspace.layout = Layout::Compare;
+        workspace.current_plate = PlateId::Spectra;
+        workspace.show_index = false;
+        workspace.show_inspector = false;
+        workspace.record_workspace();
+        let path = std::env::temp_dir().join(format!("spectra-workspace-{}.taproject", std::process::id()));
+        workspace.session.save_project(&path).unwrap();
+        let mut reopened = Workspace::new(Session::new());
+        reopened.open_path(&path);
+        assert_eq!(reopened.layout, Layout::Compare);
+        assert_eq!(reopened.current_plate, PlateId::Spectra);
+        assert!(!reopened.show_index);
+        assert!(!reopened.show_inspector);
+        assert!(reopened.session.status.problem.is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn selecting_a_plot_is_not_overwritten_by_building_the_other_plots() {
+        let mut workspace = workspace_with_dataset();
+        workspace.apply_gesture(PlateId::Contour, PlotGesture::Select {
+            data: (550.0, 1.0),
+            extend: false,
+        });
+        workspace.refresh_scenes();
+        assert_eq!(workspace.current_plate, PlateId::Contour);
     }
 
     #[test]

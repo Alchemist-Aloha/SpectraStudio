@@ -172,8 +172,8 @@ impl PanelLayout {
         y_range: (f64, f64),
         available: (f64, f64),
     ) -> Self {
-        let x_ticks = ticks_for_scale(x_scale, x_range.0, x_range.1, 6);
-        let y_ticks = ticks_for_scale(y_scale, y_range.0, y_range.1, 6);
+        let mut x_ticks = ticks_for_scale(x_scale, x_range.0, x_range.1, 6);
+        let mut y_ticks = ticks_for_scale(y_scale, y_range.0, y_range.1, 6);
 
         let tick_len = style.tick_length.max(0.0) as f64;
         let label_size = style.tick_label_size as f64;
@@ -197,7 +197,10 @@ impl PanelLayout {
         let mut left = widest_y_label + tick_len + gap;
         let mut bottom = tallest_x_label + tick_len + gap;
         let mut top = gap;
-        let mut right = gap * 1.5;
+        let widest_x_label = x_ticks.iter()
+            .map(|tick| text_width(&format_tick(*tick, x_scale), label_size))
+            .fold(0.0f64, f64::max);
+        let mut right = (gap * 1.5).max(widest_x_label * 0.5 + gap);
 
         if !panel.y.label.is_empty() {
             left += label_size * 1.4;
@@ -229,6 +232,23 @@ impl PanelLayout {
             (available.0 - right).max(left + 1.0),
             (available.1 - bottom).max(top + 1.0),
         );
+        // Split/log scales bunch ticks non-uniformly; keep labels apart at the actual paper size.
+        let viewport = PlotViewport::new(x_range, y_range, x_scale, y_scale, (plot.width(), plot.height()));
+        let mut label_end = f64::NEG_INFINITY;
+        x_ticks.retain(|tick| {
+            let Some((x, _)) = viewport.data_to_pixel(*tick, viewport.y_range().0) else { return false; };
+            let half = text_width(&format_tick(*tick, x_scale), label_size) * 0.5;
+            if x - half < label_end + gap { return false; }
+            label_end = x + half;
+            true
+        });
+        let mut label_top = f64::INFINITY;
+        y_ticks.retain(|tick| {
+            let Some((_, y)) = viewport.data_to_pixel(viewport.x_range().0, *tick) else { return false; };
+            if y + label_size * 0.625 + gap > label_top { return false; }
+            label_top = y - label_size * 0.625;
+            true
+        });
         let colorbar = wants_colorbar.then(|| {
             let bar_left = plot.x1 + label_size;
             Rect::new(
@@ -280,6 +300,11 @@ impl PanelLayout {
     ) -> PlotViewport {
         PlotViewport::new(x_range, y_range, x_scale, y_scale, self.plot_size())
     }
+}
+
+/// Translate plot-local viewport coordinates into the panel's drawing space.
+fn panel_pixel(viewport: &PlotViewport, plot: &Rect, x: f64, y: f64) -> Option<(f64, f64)> {
+    viewport.data_to_pixel(x, y).map(|(x, y)| (x + plot.x0, y + plot.y0))
 }
 
 /// An estimated text width in pixels.
@@ -513,6 +538,9 @@ pub fn draw_panel<DB: plotters::prelude::DrawingBackend>(
     heatmap: Option<&HeatmapLayer>,
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
 
+    let text_style = |size, color, anchor| text_style(size, color, anchor, &style.font_family);
+    let rotated_text_style = |size, color, anchor, transform| rotated_text_style(size, color, anchor, transform, &style.font_family);
+    let viewport = &viewport.clone().with_reversed(panel.x.reversed, panel.y.reversed);
     let plot = layout.plot;
     let x_scale = viewport.x_scale();
     let y_scale = viewport.y_scale();
@@ -525,7 +553,26 @@ pub fn draw_panel<DB: plotters::prelude::DrawingBackend>(
         if let Some(element) = BitMapElement::with_owned_buffer(
             (plot.x0.round() as i32, plot.y0.round() as i32),
             (layer.width, layer.height),
-            layer.rgb.clone(),
+            {
+                let mut pixels = layer.rgb.clone();
+                if panel.y.reversed {
+                    let row = layer.width as usize * 3;
+                    for y in 0..layer.height as usize / 2 {
+                        let opposite = layer.height as usize - 1 - y;
+                        for x in 0..row { pixels.swap(y * row + x, opposite * row + x); }
+                    }
+                }
+                if panel.x.reversed && layer.width > 0 {
+                    for row in pixels.chunks_exact_mut(layer.width as usize * 3) {
+                        for x in 0..layer.width as usize / 2 {
+                            for channel in 0..3 {
+                                row.swap(x * 3 + channel, (layer.width as usize - 1 - x) * 3 + channel);
+                            }
+                        }
+                    }
+                }
+                pixels
+            },
         ) {
             root.draw(&element)?;
         }
@@ -542,8 +589,8 @@ pub fn draw_panel<DB: plotters::prelude::DrawingBackend>(
     if style.grid {
         // One pixel wide, in the plot's own ink at low contrast.
         let grid_style = RGBColor(214, 218, 224).stroke_width(1);
-        for tick in &layout.x_ticks {
-            if let Some((x, _)) = viewport.data_to_pixel(*tick, viewport.y_range().0) {
+        for tick in layout.x_ticks.iter().filter(|_| panel.x.grid) {
+            if let Some((x, _)) = panel_pixel(viewport, &plot, *tick, viewport.y_range().0) {
                 if x < plot.x0 - 0.5 || x > plot.x1 + 0.5 {
                     continue;
                 }
@@ -556,8 +603,8 @@ pub fn draw_panel<DB: plotters::prelude::DrawingBackend>(
                 ))?;
             }
         }
-        for tick in &layout.y_ticks {
-            if let Some((_, y)) = viewport.data_to_pixel(viewport.x_range().0, *tick) {
+        for tick in layout.y_ticks.iter().filter(|_| panel.y.grid) {
+            if let Some((_, y)) = panel_pixel(viewport, &plot, viewport.x_range().0, *tick) {
                 if y < plot.y0 - 0.5 || y > plot.y1 + 0.5 {
                     continue;
                 }
@@ -592,8 +639,16 @@ pub fn draw_panel<DB: plotters::prelude::DrawingBackend>(
     // Ticks and their labels.
     let tick_style = rgb(ink).stroke_width(plotters_width(style.axis_line_width));
     let inside = style.tick_direction == ta_core::TickDirection::In;
+    if panel.x.mirror {
+        root.draw(&PathElement::new(vec![(plot.x0 as i32, plot.y0 as i32),
+            (plot.x1 as i32, plot.y0 as i32)], tick_style))?;
+    }
+    if panel.y.mirror {
+        root.draw(&PathElement::new(vec![(plot.x1 as i32, plot.y0 as i32),
+            (plot.x1 as i32, plot.y1 as i32)], tick_style))?;
+    }
     for tick in &layout.x_ticks {
-        let Some((x, _)) = viewport.data_to_pixel(*tick, viewport.y_range().0) else {
+        let Some((x, _)) = panel_pixel(viewport, &plot, *tick, viewport.y_range().0) else {
             continue;
         };
         if x < plot.x0 - 0.5 || x > plot.x1 + 0.5 {
@@ -611,6 +666,11 @@ pub fn draw_panel<DB: plotters::prelude::DrawingBackend>(
             ],
             tick_style,
         ))?;
+        if panel.x.mirror {
+            let end = if inside { plot.y0 + tick_length } else { plot.y0 - tick_length };
+            root.draw(&PathElement::new(vec![(x.round() as i32, plot.y0.round() as i32),
+                (x.round() as i32, end.round() as i32)], tick_style))?;
+        }
         let label = format_tick(*tick, x_scale);
         if !label.is_empty() {
             root.draw(&PlottersText::new(
@@ -624,7 +684,7 @@ pub fn draw_panel<DB: plotters::prelude::DrawingBackend>(
         }
     }
     for tick in &layout.y_ticks {
-        let Some((_, y)) = viewport.data_to_pixel(viewport.x_range().0, *tick) else {
+        let Some((_, y)) = panel_pixel(viewport, &plot, viewport.x_range().0, *tick) else {
             continue;
         };
         if y < plot.y0 - 0.5 || y > plot.y1 + 0.5 {
@@ -642,6 +702,11 @@ pub fn draw_panel<DB: plotters::prelude::DrawingBackend>(
             ],
             tick_style,
         ))?;
+        if panel.y.mirror {
+            let end = if inside { plot.x1 - tick_length } else { plot.x1 + tick_length };
+            root.draw(&PathElement::new(vec![(plot.x1.round() as i32, y.round() as i32),
+                (end.round() as i32, y.round() as i32)], tick_style))?;
+        }
         let label = format_tick(*tick, y_scale);
         if !label.is_empty() {
             root.draw(&PlottersText::new(
@@ -711,7 +776,7 @@ pub fn draw_panel<DB: plotters::prelude::DrawingBackend>(
         match annotation.kind {
             AnnotationKind::Text => {
                 if let (Some(x), Some(y)) = (annotation.x, annotation.y) {
-                    if let Some((px, py)) = viewport.data_to_pixel(x, y) {
+                    if let Some((px, py)) = panel_pixel(viewport, &plot, x, y) {
                         if plot.contains(px, py) {
                             root.draw(&PlottersText::new(
                                 annotation.text.clone(),
@@ -744,8 +809,8 @@ pub fn draw_panel<DB: plotters::prelude::DrawingBackend>(
                     annotation.height,
                 ) {
                     if let (Some(from), Some(to)) = (
-                        viewport.data_to_pixel(x, y),
-                        viewport.data_to_pixel(x + w, y + h),
+                        panel_pixel(viewport, &plot, x, y),
+                        panel_pixel(viewport, &plot, x + w, y + h),
                     ) {
                         let clipped = clip_polyline(&[from, to], &plot);
                         for run in clipped {
@@ -784,14 +849,8 @@ fn status_size(style: &PublicationStyle, size: f32) -> f32 {
     }
 }
 
-/// The family every figure uses unless the style says otherwise.
-///
-/// Named rather than generic so the SVG export and the screen pick the same
-/// face; a missing family falls back through the backend's own default.
-const FONT_FAMILY: &str = "Helvetica";
-
-fn text_style(size: f32, color: Rgba, anchor: Pos) -> TextStyle<'static> {
-    styled_font(size, FontTransform::None)
+fn text_style<'a>(size: f32, color: Rgba, anchor: Pos, family: &'a str) -> TextStyle<'a> {
+    styled_font(size, FontTransform::None, family)
         .color(&rgb(color))
         .pos(anchor)
 }
@@ -803,19 +862,22 @@ fn rotated_text_style(
     color: Rgba,
     anchor: Pos,
     transform: FontTransform,
-) -> TextStyle<'static> {
-    styled_font(size, transform)
+    family: &str,
+) -> TextStyle<'_> {
+    styled_font(size, transform, family)
         .color(&rgb(color))
         .pos(anchor)
 }
 
-fn styled_font(size: f32, transform: FontTransform) -> FontDesc<'static> {
-    FontDesc::new(
-        FontFamily::Name(FONT_FAMILY),
-        size as f64,
-        FontStyle::Normal,
-    )
-    .transform(transform)
+fn styled_font(size: f32, transform: FontTransform, family: &str) -> FontDesc<'_> {
+    let font = FontDesc::new(FontFamily::Name(family), size as f64, FontStyle::Normal);
+    let font = if font.box_size("M").is_ok() {
+        font
+    } else {
+        let fallback = if family.contains("Times") { FontFamily::Serif } else { FontFamily::SansSerif };
+        FontDesc::new(fallback, size as f64, FontStyle::Normal)
+    };
+    font.transform(transform)
 }
 
 fn draw_series<DB: plotters::prelude::DrawingBackend>(
@@ -837,9 +899,9 @@ fn draw_series<DB: plotters::prelude::DrawingBackend>(
     for segment in &series.segments {
         let pixel: Vec<(f64, f64)> = segment
             .iter()
-            .filter_map(|(x, y)| viewport.data_to_pixel(*x, *y))
+            .filter_map(|(x, y)| panel_pixel(viewport, &plot, *x, *y))
             .collect();
-        if pixel.len() < 2 {
+        if pixel.is_empty() {
             continue;
         }
 
@@ -864,7 +926,7 @@ fn draw_series<DB: plotters::prelude::DrawingBackend>(
         }
 
         if series.kind == SeriesKind::Bars {
-            let baseline = viewport.data_to_pixel(
+            let baseline = panel_pixel(viewport, &plot,
                 viewport.x_range().0,
                 viewport.y_range().0,
             );
@@ -939,8 +1001,8 @@ fn annotation_rect(
     let y = annotation.y?;
     let width = annotation.width.unwrap_or(0.0);
     let height = annotation.height.unwrap_or(0.0);
-    let a = viewport.data_to_pixel(x, y)?;
-    let b = viewport.data_to_pixel(x + width, y + height)?;
+    let a = panel_pixel(viewport, &plot, x, y)?;
+    let b = panel_pixel(viewport, &plot, x + width, y + height)?;
     let clipped = Rect::new(
         a.0.min(b.0).max(plot.x0),
         a.1.min(b.1).max(plot.y0),
@@ -962,8 +1024,8 @@ fn annotation_cursor_line(
     plot: &Rect,
 ) -> Option<[(i32, i32); 2]> {
     match (annotation.axis, annotation.x, annotation.y) {
-        (Some(ta_core::AxisKind::Delay), Some(_), Some(y)) => {
-            let (_, py) = viewport.data_to_pixel(viewport.x_range().0, y)?;
+        (_, None, Some(y)) | (Some(ta_core::AxisKind::Delay), Some(_), Some(y)) => {
+            let (_, py) = panel_pixel(viewport, &plot, viewport.x_range().0, y)?;
             if py < plot.y0 - 0.5 || py > plot.y1 + 0.5 {
                 return None;
             }
@@ -972,8 +1034,8 @@ fn annotation_cursor_line(
                 (plot.x1.round() as i32, py.round() as i32),
             ])
         }
-        (_, Some(x), Some(_)) => {
-            let (px, _) = viewport.data_to_pixel(x, viewport.y_range().0)?;
+        (_, Some(x), _) => {
+            let (px, _) = panel_pixel(viewport, &plot, x, viewport.y_range().0)?;
             if px < plot.x0 - 0.5 || px > plot.x1 + 0.5 {
                 return None;
             }
@@ -995,6 +1057,7 @@ fn draw_legend<DB: plotters::prelude::DrawingBackend>(
     ink: Rgba,
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
     use ta_core::LegendPosition;
+    let text_style = |size, color, anchor| text_style(size, color, anchor, &style.font_family);
 
     let entries: Vec<(&PlottedSeries, String)> = series
         .iter()
@@ -1077,6 +1140,8 @@ fn draw_color_bar<DB: plotters::prelude::DrawingBackend>(
     style: &PublicationStyle,
     ink: Rgba,
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
+    let text_style = |size, color, anchor| text_style(size, color, anchor, &style.font_family);
+    let rotated_text_style = |size, color, anchor, transform| rotated_text_style(size, color, anchor, transform, &style.font_family);
     let steps = 64usize;
     for step in 0..steps {
         let t = step as f32 / (steps - 1) as f32;
@@ -1172,6 +1237,55 @@ mod tests {
     }
 
     #[test]
+    fn editor_axis_controls_change_the_rendered_pixels() {
+        fn image(panel: &PanelModel, style: &PublicationStyle) -> Vec<u8> {
+            let layout = PanelLayout::compute(panel, style, Scale::Linear, Scale::Linear,
+                (0.0, 1.0), (0.0, 1.0), (240.0, 180.0));
+            let viewport = layout.viewport((0.0, 1.0), (0.0, 1.0), Scale::Linear, Scale::Linear);
+            let series = PlottedSeries::new("signal", vec![(0.1, 0.2), (0.8, 0.7)], SeriesStyle::default());
+            let mut pixels = vec![255; 240 * 180 * 3];
+            render_panel(panel, style, &layout, &viewport, &[series], None,
+                plotters::prelude::BitMapBackend::with_buffer(&mut pixels, (240, 180)),
+                Rgba::rgb(255,255,255)).unwrap();
+            pixels
+        }
+        let mut panel = panel();
+        panel.x.grid = true;
+        panel.y.grid = true;
+        let style = PublicationStyle { grid: true, frame: false, ..PublicationStyle::default() };
+        let initial = image(&panel, &style);
+        panel.x.grid = false;
+        assert_ne!(initial, image(&panel, &style));
+        panel.x.grid = true;
+        panel.x.mirror = true;
+        assert_ne!(initial, image(&panel, &style));
+        panel.x.mirror = false;
+        panel.y.reversed = true;
+        assert_ne!(initial, image(&panel, &style));
+        panel.y.reversed = false;
+        panel.annotations.push(ta_core::AnnotationSpec {
+            id: ta_core::AnnotationId::new(), kind: AnnotationKind::CursorLine,
+            text: "reference".into(), x: Some(0.5), y: None, axis: Some(ta_core::AxisKind::Delay),
+            width: None, height: None, color: Rgba::rgb(255,0,0), font_size: 8.0,
+        });
+        assert_ne!(initial, image(&panel, &style));
+    }
+
+    #[test]
+    fn horizontal_and_vertical_reference_lines_need_only_their_own_coordinate() {
+        let viewport = PlotViewport::new((0.0,1.0), (0.0,1.0), Scale::Linear, Scale::Linear, (100.0,100.0));
+        let plot = Rect::new(10.0,20.0,110.0,120.0);
+        let mut annotation = ta_core::AnnotationSpec {
+            id: ta_core::AnnotationId::new(), kind: AnnotationKind::CursorLine,
+            text: String::new(), x: Some(0.5), y: None, axis: Some(ta_core::AxisKind::Delay),
+            width: None, height: None, color: Rgba::rgb(0,0,0), font_size: 8.0,
+        };
+        assert_eq!(annotation_cursor_line(&annotation, &viewport, &plot), Some([(60,20),(60,120)]));
+        annotation.y = annotation.x.take();
+        assert_eq!(annotation_cursor_line(&annotation, &viewport, &plot), Some([(10,70),(110,70)]));
+    }
+
+    #[test]
     fn the_layout_leaves_room_for_the_labels_it_will_draw() {
         let panel = panel();
         let layout = layout_for(&panel);
@@ -1239,6 +1353,45 @@ mod tests {
         let (px, py) = viewport.data_to_pixel(-1.0, -0.1).unwrap();
         assert!((px - 0.0).abs() < 1e-9);
         assert!((py - layout.plot.height()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn publication_ticks_do_not_overlap_or_run_off_the_page() {
+        let panel = panel();
+        let style = PublicationStyle::default();
+        let scale = Scale::SplitLinearLog { break_at: 1.0 };
+        let layout = PanelLayout::compute(&panel, &style, scale, Scale::Linear,
+            (-1.0, 1079.775), (-0.01, 0.18), (234.0, 180.0));
+        let viewport = layout.viewport((-1.0, 1079.775), (-0.01, 0.18), scale, Scale::Linear);
+        let mut last = f64::NEG_INFINITY;
+        for tick in &layout.x_ticks {
+            let (x, _) = panel_pixel(&viewport, &layout.plot, *tick, -0.01).unwrap();
+            let half = text_width(&format_tick(*tick, scale), style.tick_label_size as f64) * 0.5;
+            assert!(x - half >= last + style.tick_label_size as f64 * 0.5);
+            assert!(x + half <= layout.available.0);
+            last = x + half;
+        }
+        assert!(layout.x_ticks.len() >= 4, "the axis still needs useful tick labels");
+    }
+
+    #[test]
+    fn series_are_drawn_in_the_plot_rectangle_not_the_panel_origin() {
+        let mut pixels = vec![255u8; 200 * 180 * 3];
+        let plot = Rect::new(50.0, 30.0, 150.0, 130.0);
+        let viewport = PlotViewport::new((0.0, 1.0), (0.0, 1.0), Scale::Linear, Scale::Linear, (100.0, 100.0));
+        let series = PlottedSeries::new("rise", vec![(0.0, 0.0), (1.0, 1.0)], SeriesStyle {
+            color: Rgba::rgb(255, 0, 0), width: 2.0, ..SeriesStyle::default()
+        });
+        {
+            let root = BitMapBackend::with_buffer(&mut pixels, (200, 180)).into_drawing_area();
+            draw_series(&root, &series, &viewport, &plot).unwrap();
+            root.present().unwrap();
+        }
+        let offset = (125 * 200 + 55) * 3;
+        assert_eq!(&pixels[offset..offset + 3], &[255, 0, 0], "the early-time portion must not be clipped away");
+        let shifted = Rect::new(90.0, 70.0, 190.0, 170.0);
+        assert_eq!(panel_pixel(&viewport, &shifted, 0.0, 0.0), Some((90.0, 170.0)));
+        assert_eq!(panel_pixel(&viewport, &shifted, 1.0, 1.0), Some((190.0, 70.0)));
     }
 
     #[test]

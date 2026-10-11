@@ -21,8 +21,13 @@ impl Workspace {
         for layout in Layout::ALL {
             let active = self.layout == layout;
             tabs.push(
-                div()
-                    .id(ElementId::Name(format!("layout-{}", layout.label()).into()))
+                gpui_kit::base::Button::new(ElementId::Name(format!("layout-{}", layout.label()).into()))
+                    .accessibility_label(layout.label())
+                    .selected(active)
+                    .cursor_pointer()
+                    .min_h(px(30.0))
+                    .hover(|style| style.bg(ink::paper()))
+                    .focus(|style| style.underline().bg(ink::hair()))
                     .flex()
                     .flex_col()
                     .px_3()
@@ -55,6 +60,7 @@ impl Workspace {
                             workspace.open_studio(plate);
                         }
                         workspace.touch();
+                        workspace.sync_studio_fields(_window, cx);
                         cx.notify();
                     }))
                     .into_any_element(),
@@ -63,11 +69,23 @@ impl Workspace {
         div()
             .w_full()
             .flex()
-            .items_end()
+            .items_center()
             .bg(ink::ground())
             .border_b_1()
             .border_color(ink::rule())
             .children(tabs)
+            .child(if self.layout == Layout::Figure {
+                div().flex().items_center().gap_2().px_2()
+                    .child(widgets::switch("Datasets", self.show_index, cx, |workspace| {
+                        workspace.show_index = !workspace.show_index;
+                    }))
+                    .child(widgets::switch("Inspector", self.show_inspector, cx, |workspace| {
+                        workspace.show_inspector = !workspace.show_inspector;
+                    }))
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            })
             .child(
                 div()
                     .flex_1()
@@ -109,11 +127,11 @@ impl Workspace {
                                 gpui_kit::component::h_resizable("compare-panes")
                                     .child(
                                         gpui_kit::component::resizable_panel()
-                                            .child(self.captioned_plate(left, "spectra", &self.compare_caption.1)),
+                                            .child(self.captioned_plate(left, "spectra", &self.compare_caption.1, cx)),
                                     )
                                     .child(
                                         gpui_kit::component::resizable_panel()
-                                            .child(self.captioned_plate(right, "kinetics", &self.compare_caption.0)),
+                                            .child(self.captioned_plate(right, "kinetics", &self.compare_caption.0, cx)),
                                     ),
                             ),
                     )
@@ -129,7 +147,9 @@ impl Workspace {
         element: impl IntoElement,
         key: &str,
         caption: &str,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let spectra = key == "spectra";
         div()
             .flex()
             .flex_col()
@@ -150,6 +170,13 @@ impl Workspace {
                     .border_color(ink::hair())
                     .text_size(px(11.0))
                     .text_color(ink::text())
+                    .child(widgets::action_id(
+                        "FigureStudio",
+                        ElementId::Name(format!("studio-compare-{key}").into()),
+                        false,
+                        cx,
+                        move |workspace, _, _| workspace.open_comparison_studio(spectra),
+                    ))
                     .child(format!("[{key}] {caption}")),
             )
     }
@@ -221,7 +248,8 @@ impl Workspace {
                     )
                     .child(
                         div()
-                            .w(px(560.0))
+                            .w(px(if self.fit_edit_parameters { 560.0 } else { 392.0 }))
+                            .flex_shrink_0()
                             .h_full()
                             .flex()
                             .flex_col()
@@ -242,7 +270,7 @@ impl Workspace {
                                     .border_color(ink::rule())
                                     .child(widgets::small_caps_in_panel("Parameters"))
                                     .child(
-                                        div().px_3().child(widgets::switch(
+                                        div().px_3().py_2().child(widgets::switch(
                                             "edit start values and bounds",
                                             self.fit_edit_parameters,
                                             cx,
@@ -497,14 +525,14 @@ impl Workspace {
                                     false,
                                     cx,
                                     move |workspace, _, _| workspace.move_series(series_index, -1),
-                                ))
+                                ).disabled(series_index == 0))
                                 .child(widgets::action_id(
                                     "↓",
                                     ElementId::Name(format!("studio-down-{id}").into()),
                                     false,
                                     cx,
                                     move |workspace, _, _| workspace.move_series(series_index, 1),
-                                )),
+                                ).disabled(series_index + 1 == panel.series.len())),
                         )
                         .child(widgets::text_input(&legend_state, 190.0))
                         .into_any_element(),
@@ -610,7 +638,11 @@ impl Workspace {
                                 cx,
                                 move |workspace| {
                                     if let Some(figure) = workspace.session.studio.as_mut() {
-                                        figure.apply_preset(preset);
+                                        if preset == ta_core::JournalPreset::Custom {
+                                            figure.style.preset = preset;
+                                        } else {
+                                            figure.apply_preset(preset);
+                                        }
                                     }
                                     workspace.touch();
                                 },
@@ -625,7 +657,7 @@ impl Workspace {
                         .items_center()
                         .gap_2()
                         .child(widgets::number_input(&font_state, 52.0))
-                        .child(widgets::readout("pt everywhere")),
+                        .child(widgets::readout("pt base")),
                 ))
                 .child(widgets::field(
                     "Tick and legend type",
@@ -649,10 +681,9 @@ impl Workspace {
                     .flex()
                     .flex_wrap()
                     .gap_1()
-                    .children(studio::style_presets().into_iter().map(|(name, _)| {
-                        let active = figure.style.preset == ta_core::JournalPreset::Custom
-                            && figure.style.font_family == style_family(&name);
-                        let label: &'static str = Box::leak(name.into_boxed_str());
+                    .children(studio::style_presets().into_iter().map(|(label, mut style)| {
+                        style.preset = figure.style.preset;
+                        let active = figure.style == style;
                         widgets::choice(label, active, cx, move |workspace| {
                             workspace.apply_style_preset(label)
                         })
@@ -696,10 +727,13 @@ impl Workspace {
                                     .items_center()
                                     .gap_1()
                                     .children(studio::series_colors().into_iter().map(|chosen| {
-                                        div()
-                                            .id(ElementId::Name(
-                                                format!("color-{}-{}", id, chosen.to_hex()).into(),
-                                            ))
+                                        gpui_kit::base::Button::new(ElementId::Name(
+                                            format!("color-{}-{}", id, chosen.to_hex()).into(),
+                                        ))
+                                            .accessibility_label(format!("Series {} color {}", index + 1, chosen.to_hex()))
+                                            .cursor_pointer()
+                                            .size(px(20.0))
+                                            .focus(|style| style.border_2().border_color(ink::accent()))
                                             .child(studio::swatch(chosen, chosen == color))
                                             .on_click(cx.listener(
                                                 move |workspace, _event, _window, cx| {
@@ -731,7 +765,7 @@ impl Workspace {
                                                     (series.style.width + 0.5).min(8.0);
                                             })
                                         },
-                                    ))
+                                    ).disabled(style.width >= 8.0 || matches!(kind, ta_core::SeriesKind::Markers | ta_core::SeriesKind::Scatter)))
                                     .child(widgets::action_id(
                                         "thinner",
                                         ElementId::Name(format!("thin-{id}").into()),
@@ -743,7 +777,7 @@ impl Workspace {
                                                     (series.style.width - 0.5).max(0.25);
                                             })
                                         },
-                                    )),
+                                    ).disabled(style.width <= 0.25 || matches!(kind, ta_core::SeriesKind::Markers | ta_core::SeriesKind::Scatter))),
                             )
                             .child(
                                 div()
@@ -760,7 +794,7 @@ impl Workspace {
                                                     series.style.dash = dash;
                                                 })
                                             },
-                                        )
+                                        ).disabled(matches!(kind, ta_core::SeriesKind::Markers | ta_core::SeriesKind::Scatter | ta_core::SeriesKind::Bars))
                                         .into_any_element()
                                     })),
                             )
@@ -772,12 +806,12 @@ impl Workspace {
                                     .children(studio::markers().into_iter().map(|(label, marker)| {
                                         widgets::choice(
                                             label,
-                                            style.marker == marker,
+                                            if matches!(kind, ta_core::SeriesKind::Markers | ta_core::SeriesKind::LineMarkers | ta_core::SeriesKind::Scatter) {
+                                                style.marker == marker
+                                            } else { marker == ta_core::MarkerShape::None },
                                             cx,
                                             move |workspace| {
-                                                workspace.edit_series(id, move |series| {
-                                                    series.style.marker = marker;
-                                                })
+                                                workspace.set_series_marker(id, marker)
                                             },
                                         )
                                         .into_any_element()
@@ -794,9 +828,7 @@ impl Workspace {
                                             kind == chosen,
                                             cx,
                                             move |workspace| {
-                                                workspace.edit_series(id, move |series| {
-                                                    series.kind = chosen;
-                                                })
+                                                workspace.set_series_kind(id, chosen)
                                             },
                                         )
                                         .into_any_element()
@@ -890,6 +922,10 @@ impl Workspace {
                         .child(widgets::switch("grid", figure.style.grid, cx, |workspace| {
                             if let Some(figure) = workspace.session.studio.as_mut() {
                                 figure.style.grid = !figure.style.grid;
+                                for panel in &mut figure.panels {
+                                    panel.x.grid = figure.style.grid;
+                                    panel.y.grid = figure.style.grid;
+                                }
                             }
                             workspace.touch();
                         }))
@@ -1077,7 +1113,8 @@ impl Workspace {
                                         |workspace, _, _| {
                                             workspace.edit_contour(|contour| {
                                                 contour.level_count =
-                                                    (contour.level_count + 2).min(40)
+                                                    (contour.level_count + 2).min(40);
+                                                contour.levels.clear();
                                             })
                                         },
                                     ))
@@ -1089,7 +1126,8 @@ impl Workspace {
                                         |workspace, _, _| {
                                             workspace.edit_contour(|contour| {
                                                 contour.level_count =
-                                                    contour.level_count.saturating_sub(2).max(2)
+                                                    contour.level_count.saturating_sub(2).max(2);
+                                                contour.levels.clear();
                                             })
                                         },
                                     )),
@@ -1221,8 +1259,10 @@ impl Workspace {
         div()
             .w_full()
             .flex()
+            .flex_wrap()
+            .flex_shrink_0()
             .items_center()
-            .gap_4()
+            .gap_2()
             .px_4()
             .py_2()
             .bg(ink::ground())
@@ -1238,7 +1278,6 @@ impl Workspace {
                         [
                             ("SVG (default)", ExportFormat::Svg),
                             ("PNG", ExportFormat::Png),
-                            ("PDF", ExportFormat::Pdf),
                         ]
                         .into_iter()
                         .map(|(label, chosen)| {
@@ -1252,6 +1291,7 @@ impl Workspace {
                         }),
                     ),
             )
+            .child(widgets::readout("PDF export not yet supported"))
             .child(
                 div()
                     .flex()
@@ -1286,7 +1326,9 @@ impl Workspace {
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(320.0))
                     .flex()
+                    .flex_wrap()
                     .justify_end()
                     .items_center()
                     .gap_4()
@@ -1327,7 +1369,12 @@ impl Workspace {
     pub fn edit_axis(&mut self, horizontal: bool, change: impl FnOnce(&mut ta_core::AxisModel)) {
         if let Some(figure) = self.session.studio.as_mut() {
             if let Some(panel) = figure.panel_mut(0) {
+                let old_grid = if horizontal { panel.x.grid } else { panel.y.grid };
                 change(if horizontal { &mut panel.x } else { &mut panel.y });
+                let new_grid = if horizontal { panel.x.grid } else { panel.y.grid };
+                if old_grid != new_grid {
+                    figure.style.grid = panel.x.grid || panel.y.grid;
+                }
             }
         }
         self.touch();
@@ -1354,6 +1401,9 @@ impl Workspace {
                     if target != index {
                         let series = panel.series.remove(index);
                         panel.series.insert(target, series);
+                        for (z, series) in panel.series.iter_mut().enumerate() {
+                            series.z = z as i32;
+                        }
                     }
                 }
             }
@@ -1399,25 +1449,20 @@ impl Workspace {
     /// Marks the current selection with a reference line on the figure, which
     /// is what a kinetic trace's paper figure usually carries.
     pub fn mark_selection(&mut self) {
-        let coordinate = self
-            .session
-            .spectrum
-            .as_ref()
-            .map(|spectrum| spectrum.delay.coordinate)
-            .or_else(|| {
-                self.session
-                    .trace
-                    .as_ref()
-                    .map(|trace| trace.wavelength.coordinate)
-            });
+        let on_delay = matches!(self.current_plate, crate::session::PlateId::Kinetics | crate::session::PlateId::Contour);
+        let coordinate = if on_delay {
+            self.session.spectrum.as_ref().map(|spectrum| spectrum.delay.coordinate)
+        } else {
+            self.session.trace.as_ref().map(|trace| trace.wavelength.coordinate)
+        };
         let Some(value) = coordinate else {
             self.session.status.problem("nothing is selected to mark");
             return;
         };
-        let on_delay = self.session.spectrum.is_some();
+
         if let Some(figure) = self.session.studio.as_mut() {
             if let Some(panel) = figure.panel_mut(0) {
-                let line = studio::reference_line(
+                let mut line = studio::reference_line(
                     if on_delay {
                         ta_core::AxisKind::Delay
                     } else {
@@ -1430,6 +1475,9 @@ impl Workspace {
                         format!("{value:.2} nm")
                     },
                 );
+                if self.current_plate == crate::session::PlateId::Contour {
+                    line.y = line.x.take();
+                }
                 panel.annotations.push(line);
             }
         }
@@ -1451,15 +1499,6 @@ fn empty_plate(message: &str) -> AnyElement {
         .text_color(ink::muted())
         .child(message.to_string())
         .into_any_element()
-}
-
-/// The font a style preset's name implies, for showing which one is in force.
-fn style_family(name: &str) -> String {
-    match name {
-        "Nature" => "Arial".to_string(),
-        "IEEE" => "Times New Roman".to_string(),
-        _ => "Helvetica".to_string(),
-    }
 }
 
 /// Whether two axis scales are the same choice.

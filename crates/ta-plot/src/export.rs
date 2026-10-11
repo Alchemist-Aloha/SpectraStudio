@@ -121,8 +121,10 @@ pub fn audit(figure: &FigureModel, panels: &[ExportPanel]) -> Result<ExportAudit
             continue;
         }
         let available = (figure_width * rect.width, figure_height * rect.height);
-        let x_range = panel.x.range.unwrap_or((0.0, 1.0));
-        let y_range = panel.y.range.unwrap_or((0.0, 1.0));
+        let fitted = fit_panel(panel, panels.iter().find(|data| data.index == index)
+            .map(|data| data.series.as_slice()).unwrap_or(&[]));
+        let x_range = panel.x.range.unwrap_or(fitted.0);
+        let y_range = panel.y.range.unwrap_or(fitted.1);
         let x_scale = Scale::new(panel.x.scale).unwrap_or(Scale::Linear);
         let y_scale = Scale::new(panel.y.scale).unwrap_or(Scale::Linear);
         let layout = PanelLayout::compute(
@@ -440,7 +442,7 @@ pub fn scaled_series(series: &[PlottedSeries], scale: f64) -> Vec<PlottedSeries>
 
 /// The data range of a panel's series, used when the panel has no explicit
 /// limits.
-fn fit_panel(panel: &PanelModel, series: &[PlottedSeries]) -> ((f64, f64), (f64, f64)) {
+pub fn fit_panel(panel: &PanelModel, series: &[PlottedSeries]) -> ((f64, f64), (f64, f64)) {
     let mut bounds: Option<(f64, f64, f64, f64)> = None;
     for plotted in series {
         for (x, y) in plotted.points() {

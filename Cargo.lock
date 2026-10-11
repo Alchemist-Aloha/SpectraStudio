@@ -6838,6 +6838,8 @@ version = "0.1.0"
 dependencies = [
  "gpui-kit",
  "ndarray",
+ "serde",
+ "serde_json",
  "ta-core",
  "ta-fitting",
  "ta-glotaran",
@@ -6856,6 +6858,7 @@ dependencies = [
  "serde_json",
  "ta-core",
  "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]

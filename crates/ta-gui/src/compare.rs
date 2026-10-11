@@ -306,6 +306,32 @@ fn strongest_wavelength(dataset: &TaDataset, version: VersionId) -> Option<f64> 
 
 /// The comparison toolbar: what is loaded, what goes in, and how it is shown.
 impl Workspace {
+    pub fn open_comparison_studio(&mut self, spectra: bool) {
+        let curves = self.session.comparison_pane(spectra);
+        if curves.is_empty() {
+            self.session.status.problem("Add a visible trace or spectrum to this comparison first.");
+            return;
+        }
+        let content = pane_content(&self.session, spectra, plates::style());
+        let mut figure = ta_core::FigureModel::single_panel(self.session.comparison_caption(spectra));
+        figure.panels[0] = content.panel;
+        if let Some(comparison) = self.session.comparison() {
+            for curve in curves {
+                let mut series = comparison.series[curve.series].clone();
+                // Bake display transforms into references, never into the measured matrices.
+                series.display = curve.transform;
+                series.label = curve.label;
+                figure.panels[0].series.push(series);
+            }
+        }
+        figure.set_type_size(figure.style.base_font_size);
+        self.session.studio = Some(figure);
+        self.current_plate = if spectra { crate::session::PlateId::Spectra } else { crate::session::PlateId::Kinetics };
+        self.layout = crate::app::Layout::Studio;
+        self.session.status.info("FigureStudio opened on the comparison; display transforms preserved.");
+        self.touch();
+    }
+
     pub fn compare_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let datasets: Vec<AnyElement> = self
             .session
@@ -775,7 +801,15 @@ pub fn pane_content(
             ta_core::AxisScale::SplitLinearLog { break_at: 1.0 },
         )
     };
-    panel.y = plates::axis("ΔOD", None, ta_core::AxisScale::Linear);
+    let normalized = curves.iter().any(|curve| curve.normalized);
+    let y_label = if normalized && curves.iter().any(|curve| !curve.normalized) {
+        "Signal (partly normalized)"
+    } else if normalized {
+        "Normalized signal"
+    } else {
+        "ΔOD"
+    };
+    panel.y = plates::axis(y_label, None, ta_core::AxisScale::Linear);
     panel.legend.visible = curves.len() > 1;
     let _ = style;
 
@@ -887,6 +921,49 @@ mod tests {
         session.project.add_dataset(second);
         session.open_bench(id);
         session
+    }
+
+    #[test]
+    fn the_comparison_opens_in_studio_without_losing_normalization_or_dataset_sources() {
+        let mut session = session_with_two_datasets();
+        session.add_to_comparison(SeriesTarget::Trace).unwrap();
+        let first = session.project.datasets[0].id;
+        session.open_bench(first);
+        session.add_to_comparison(SeriesTarget::Trace).unwrap();
+        session.set_normalization(Normalization::MaxAbs);
+        let series = &mut session.comparison_mut().series[0];
+        series.display.scale = 2.0;
+        series.display.offset = 0.25;
+        series.display.coordinate_offset = 0.5;
+        let expected: Vec<_> = session.comparison_pane(false).iter().map(Resolved::plotted).collect();
+        let before = session.project.datasets[0].active_matrix().clone();
+        let mut workspace = Workspace::new(session);
+        workspace.open_comparison_studio(false);
+        let actual = workspace.studio_preview().unwrap();
+        assert_eq!(actual.series, expected);
+        assert_eq!(actual.panel.y.label, "Normalized signal");
+        assert_eq!(workspace.session.project.datasets[0].active_matrix(), &before);
+        assert_eq!(workspace.session.studio.as_ref().unwrap().panels[0].series.len(), 2);
+        assert_eq!(workspace.layout, crate::app::Layout::Studio);
+    }
+
+    #[test]
+    fn a_failed_zero_reference_does_not_claim_normalized_units() {
+        let mut session = session_with_two_datasets();
+        session.add_to_comparison(SeriesTarget::Trace).unwrap();
+        session.set_normalization(Normalization::AtDelay(0.0));
+        assert!(!session.comparison_pane(false)[0].normalized);
+        assert_eq!(pane_content(&session, false, plates::style()).panel.y.label, "ΔOD");
+    }
+
+    #[test]
+    fn an_empty_comparison_does_not_replace_the_current_figure() {
+        let mut workspace = Workspace::new(session_with_two_datasets());
+        workspace.open_studio(crate::session::PlateId::Kinetics);
+        let before = workspace.session.studio.clone();
+        workspace.open_comparison_studio(true);
+        assert_eq!(workspace.session.studio, before);
+        assert!(workspace.session.status.problem.is_some());
     }
 
     #[test]

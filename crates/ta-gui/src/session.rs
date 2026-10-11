@@ -62,7 +62,7 @@ impl Status {
 
 /// How a trace or spectrum is read off its axis, and the width when it is
 /// averaged.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Sampling {
     pub mode: SampleMode,
     /// The half-width used by an averaged window.
@@ -123,6 +123,19 @@ pub const DEFAULT_SPECTRUM_DELAYS: [f64; 17] = [
     -0.5, -0.2, 0.0, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0,
     1000.0, 1500.0,
 ];
+
+/// The analysis view saved alongside the project's matrices, not in source files.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedAnalysis {
+    opened: Option<DatasetId>,
+    trace: Option<TraceSelection>,
+    spectrum: Option<SpectrumSelection>,
+    wavelengths: Vec<f64>,
+    delays: Vec<f64>,
+    sampling: Sampling,
+    comparison: usize,
+    studio: Option<ta_core::FigureModel>,
+}
 
 /// Everything the workspace knows.
 #[derive(Debug)]
@@ -414,15 +427,19 @@ impl Session {
         crate::plates::delay_label(delay)
     }
 
-    /// Whether the open dataset carries a time-zero correction anywhere in its
-    /// chain.
-    pub fn has_time_zero_correction(&self) -> bool {
-        self.dataset().is_some_and(|dataset| {
-            dataset
-                .versions
-                .iter()
-                .any(|version| matches!(version.op, Some(ta_core::ProcessingOp::TimeZero(_))))
+    /// The most recent correction that actually produced the displayed version.
+    pub fn time_zero_curve(&self) -> Option<&ta_core::CorrectionCurve> {
+        let dataset = self.dataset()?;
+        dataset.ancestry(self.version?).into_iter().rev().find_map(|id| {
+            match &dataset.version(id).ok()?.op {
+                Some(ta_core::ProcessingOp::TimeZero(correction)) => Some(&correction.curve),
+                _ => None,
+            }
         })
+    }
+
+    pub fn has_time_zero_correction(&self) -> bool {
+        self.time_zero_curve().is_some()
     }
 
     /// The datasets loaded in the project, oldest first, for the index.
@@ -633,6 +650,7 @@ impl Session {
             }
             spectrum.version = version;
         }
+        self.dataset_mut().expect("a dataset is open").set_active(version)?;
         self.version = Some(version);
         self.dirty = true;
         match notes.is_empty() {
@@ -941,14 +959,11 @@ impl Session {
                 text
             }
             PlateId::TimeZero => {
-                let fitted = dataset
-                    .versions
-                    .iter()
-                    .any(|version| matches!(version.op, Some(ta_core::ProcessingOp::TimeZero(_))));
+                let fitted = self.has_time_zero_correction();
                 if fitted {
                     "The correction curve this version was built with.".to_string()
                 } else {
-                    "No time-zero correction for this version. Fit a trace in FitWorkbench and press Auto time zero, or drag a line on the contour."
+                    "No time-zero correction for this version. FitWorkbench can estimate a curve; applying and editing corrections is not available yet."
                         .to_string()
                 }
             }
@@ -958,6 +973,24 @@ impl Session {
     // -- persistence -------------------------------------------------------
 
     pub fn save_project(&mut self, path: &std::path::Path) -> Result<()> {
+        let view = SavedAnalysis {
+            opened: self.opened,
+            trace: self.trace.clone(),
+            spectrum: self.spectrum.clone(),
+            wavelengths: self.comparison_wavelengths.clone(),
+            delays: self.comparison_delays.clone(),
+            sampling: self.sampling,
+            comparison: self.comparison,
+            studio: self.studio.clone(),
+        };
+        let value = serde_json::to_value(view)
+            .map_err(|error| CoreError::invalid(format!("cannot save the analysis view: {error}")))?;
+        let mut layout = self.project.layout.clone().unwrap_or_else(|| serde_json::json!({}));
+        if !layout.is_object() {
+            layout = serde_json::json!({});
+        }
+        layout["analysis"] = value;
+        self.project.layout = Some(layout);
         ta_io::save_project(&self.project, path)?;
         self.path = Some(path.to_path_buf());
         self.dirty = false;
@@ -966,8 +999,51 @@ impl Session {
     }
 
     pub fn load_project(&mut self, path: &std::path::Path) -> Result<()> {
-        let loaded = ta_io::load_project(path)?;
+        let mut loaded = ta_io::load_project(path)?;
+        let saved = loaded.project.layout.as_ref()
+            .and_then(|layout| layout.get("analysis"))
+            .map(|value| serde_json::from_value::<SavedAnalysis>(value.clone()))
+            .transpose()
+            .map_err(|error| CoreError::invalid(format!("cannot restore the analysis view: {error}")))?;
+        if let Some(view) = &saved {
+            if view.opened.is_none() && (view.trace.is_some() || view.spectrum.is_some()) {
+                return Err(CoreError::invalid("saved selections have no active dataset"));
+            }
+            if let Some(figure) = &view.studio {
+                loaded.project.figures.push(figure.clone());
+                let valid = loaded.project.validate();
+                loaded.project.figures.pop();
+                valid?;
+            }
+            if let Some(id) = view.opened {
+                let dataset = loaded.project.dataset(id)?;
+                if let Some(trace) = &view.trace {
+                    if trace.dataset != id || trace.version != dataset.active_version {
+                        return Err(CoreError::invalid("saved trace does not match the active dataset version"));
+                    }
+                    kinetic_trace(dataset, trace)?;
+                }
+                if let Some(spectrum) = &view.spectrum {
+                    if spectrum.dataset != id || spectrum.version != dataset.active_version {
+                        return Err(CoreError::invalid("saved spectrum does not match the active dataset version"));
+                    }
+                    transient_spectrum(dataset, spectrum)?;
+                }
+            }
+            if view.wavelengths.iter().chain(&view.delays).any(|value| !value.is_finite())
+                || !view.sampling.half_width.is_finite() || view.sampling.half_width < 0.0
+                || view.sampling.channels == 0 {
+                return Err(CoreError::invalid("saved sampling settings are invalid"));
+            }
+        }
         self.project = loaded.project;
+        self.fit = None;
+        self.estimated_curve = None;
+        self.studio = None;
+        self.comparison_wavelengths.clear();
+        self.comparison_delays.clear();
+        self.sampling = Sampling::default();
+        self.comparison = 0;
         self.opened = self.project.datasets.first().map(|dataset| dataset.id);
         self.version = self
             .opened
@@ -981,6 +1057,17 @@ impl Session {
             .opened
             .and_then(|id| self.project.dataset(id).ok())
             .and_then(|dataset| dataset.spectra.first().cloned());
+        if let Some(view) = saved {
+            self.opened = view.opened;
+            self.version = self.dataset().map(|dataset| dataset.active_version);
+            self.trace = view.trace;
+            self.spectrum = view.spectrum;
+            self.comparison_wavelengths = view.wavelengths;
+            self.comparison_delays = view.delays;
+            self.sampling = view.sampling;
+            self.comparison = view.comparison.min(self.project.comparisons.len().saturating_sub(1));
+            self.studio = view.studio;
+        }
         self.path = Some(path.to_path_buf());
         self.dirty = false;
         // Only what the project did not carry is defaulted; a saved trace or
@@ -1415,8 +1502,95 @@ mod tests {
             reopened.trace.as_ref().map(|trace| trace.wavelength)
         );
         assert_eq!(reopened.project.figures.len(), 0, "the figure lives on the dataset");
-        assert_eq!(reopened.comparison_wavelengths.len(), 0);
+        assert_eq!(reopened.comparison_wavelengths, session.comparison_wavelengths);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn reopening_restores_the_bench_sampling_and_overlays_without_changing_data() {
+        let mut session = session();
+        session.open_dataset(dataset());
+        let second = session.opened;
+        session.select_point(600.0, 10.0).unwrap();
+        session.save_current_trace().unwrap();
+        session.clear_delays();
+        session.save_current_spectrum().unwrap();
+        session.set_sampling(Sampling {
+            mode: SampleMode::AverageChannels { count: 3 },
+            channels: 3,
+            half_width: 7.0,
+        });
+        let before = session.current_trace().unwrap().signal;
+        let path = std::env::temp_dir().join(format!("spectra-view-{}.taproject", std::process::id()));
+        session.save_project(&path).unwrap();
+        let mut reopened = Session::new();
+        reopened.load_project(&path).unwrap();
+        assert_eq!(reopened.opened, second);
+        assert_eq!(reopened.trace, session.trace);
+        assert_eq!(reopened.spectrum, session.spectrum);
+        assert_eq!(reopened.sampling, session.sampling);
+        assert_eq!(reopened.comparison_wavelengths, vec![600.0]);
+        assert_eq!(reopened.comparison_delays, vec![10.0]);
+        assert_eq!(reopened.current_trace().unwrap().signal, before);
+        assert!(!reopened.dirty);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn restoring_raw_updates_the_saved_active_version() {
+        let mut session = session();
+        let raw = session.version.unwrap();
+        let dataset = session.dataset_mut().unwrap();
+        let corrected = dataset.add_derived(
+            dataset.active_matrix().clone(),
+            dataset.unit(raw).unwrap(),
+            dataset.wavelength().clone(), dataset.delay().clone(),
+            "Background corrected", ta_core::ProcessingOp::BackgroundPreZero(
+                ta_core::PreZeroBackground { range: ta_core::PreZeroRange::FirstPoints { count: 1 } }
+            ), vec![raw],
+        ).unwrap();
+        session.set_version(corrected).unwrap();
+        session.set_version(raw).unwrap();
+        assert_eq!(session.dataset().unwrap().active_version, raw);
+        assert_eq!(session.dataset().unwrap().versions.len(), 2, "restoring does not delete work");
+    }
+
+    #[test]
+    fn restoring_raw_does_not_show_an_unrelated_chirp_curve() {
+        let mut session = session();
+        let raw = session.version.unwrap();
+        let dataset = session.dataset_mut().unwrap();
+        let corrected = dataset.add_derived(
+            dataset.active_matrix().clone(), dataset.unit(raw).unwrap(),
+            dataset.wavelength().clone(), dataset.delay().clone(), "Time-zero corrected",
+            ta_core::ProcessingOp::TimeZero(ta_core::TimeZeroCorrection {
+                origin: ta_core::CorrectionOrigin::Manual,
+                curve: ta_core::CorrectionCurve::new(vec![ta_core::ControlPoint { wavelength: 550.0, time_zero: 0.1 }]),
+                interpolation: ta_core::Interpolation::Linear,
+                boundary: ta_core::BoundaryMode::Clamp,
+            }), vec![raw],
+        ).unwrap();
+        session.set_version(corrected).unwrap();
+        assert!(session.has_time_zero_correction());
+        assert!(!crate::plates::time_zero_content(&session).series.is_empty());
+        session.set_version(raw).unwrap();
+        assert!(!session.has_time_zero_correction());
+        assert!(crate::plates::time_zero_content(&session).series.is_empty());
+        assert!(session.caption(PlateId::TimeZero).contains("No time-zero correction"));
+    }
+
+    #[test]
+    fn an_invalid_saved_view_does_not_replace_open_work() {
+        let mut session = session();
+        let opened = session.opened;
+        let path = std::env::temp_dir().join(format!("spectra-invalid-view-{}.taproject", std::process::id()));
+        let mut project = session.project.clone();
+        project.layout = Some(serde_json::json!({"analysis": {"opened": "broken"}}));
+        ta_io::save_project(&project, &path).unwrap();
+        assert!(session.load_project(&path).is_err());
+        assert_eq!(session.opened, opened);
+        assert!(session.current_trace().is_ok());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

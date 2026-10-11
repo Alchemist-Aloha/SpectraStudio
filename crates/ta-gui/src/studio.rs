@@ -9,7 +9,7 @@
 use crate::app::{ink, Workspace};
 use crate::plates::{self, PlateContent};
 use crate::widgets::{self, FieldId};
-use gpui_kit::{div, px, AnyElement, Context, ElementId, IntoElement, ParentElement, Styled};
+use gpui_kit::{div, px, AnyElement, Context, ElementId, IntoElement, ParentElement, Styled, Window};
 use std::path::PathBuf;
 use ta_core::{
     AnnotationKind, AnnotationSpec, AxisScale, DashPattern, ExportFormat, FigureModel,
@@ -18,18 +18,18 @@ use ta_core::{
 };
 
 /// A figure style the user can apply to any figure. The presets of §17.12.
-pub fn style_presets() -> Vec<(String, PublicationStyle)> {
+pub fn style_presets() -> Vec<(&'static str, PublicationStyle)> {
     let base = PublicationStyle::default();
     vec![
         (
-            "General scientific".to_string(),
+            "General scientific",
             PublicationStyle {
                 font_family: "Helvetica".to_string(),
                 ..base.clone()
             },
         ),
         (
-            "ACS / JACS".to_string(),
+            "ACS / JACS",
             PublicationStyle {
                 font_family: "Helvetica".to_string(),
                 base_font_size: 8.0,
@@ -46,7 +46,7 @@ pub fn style_presets() -> Vec<(String, PublicationStyle)> {
             },
         ),
         (
-            "Nature".to_string(),
+            "Nature",
             PublicationStyle {
                 font_family: "Arial".to_string(),
                 base_font_size: 7.0,
@@ -63,7 +63,7 @@ pub fn style_presets() -> Vec<(String, PublicationStyle)> {
             },
         ),
         (
-            "IEEE".to_string(),
+            "IEEE",
             PublicationStyle {
                 font_family: "Times New Roman".to_string(),
                 base_font_size: 8.0,
@@ -74,7 +74,7 @@ pub fn style_presets() -> Vec<(String, PublicationStyle)> {
             },
         ),
         (
-            "Presentation".to_string(),
+            "Presentation",
             PublicationStyle {
                 base_font_size: 14.0,
                 axis_title_size: 16.0,
@@ -116,11 +116,13 @@ impl Workspace {
             FieldId::FigureWidth => {
                 if let Some(value) = widgets::parse_number(text) {
                     figure.size.width = value.max(0.5);
+                    figure.style.preset = JournalPreset::Custom;
                 }
             }
             FieldId::FigureHeight => {
                 if let Some(value) = widgets::parse_number(text) {
                     figure.size.height = value.max(0.5);
+                    figure.style.preset = JournalPreset::Custom;
                 }
             }
             FieldId::FigureFontSize => {
@@ -234,6 +236,8 @@ impl Workspace {
         // is typed the way the figure says, so the three controls in the panel
         // and the type on screen agree from the first moment.
         figure.set_type_size(figure.style.base_font_size);
+        figure.panels[0].x.grid = figure.style.grid;
+        figure.panels[0].y.grid = figure.style.grid;
         // The records are the plate's own: a reference to a dataset and a
         // coordinate, not a copy of the numbers, so the studio edits the same
         // figure the plate was showing.
@@ -242,6 +246,7 @@ impl Workspace {
             record.style = content_style(plate, index, count);
             figure.panels[0].series.push(record.clone());
         }
+        self.studio_plates.clear();
         self.session.studio = Some(figure);
         self.layout = crate::app::Layout::Studio;
         self.current_plate = plate;
@@ -401,6 +406,55 @@ impl Workspace {
         self.session.studio.as_ref()
     }
 
+    pub(crate) fn sync_studio_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.layout != crate::app::Layout::Studio { return; }
+        let Some(figure) = self.studio_figure() else { return; };
+        let Some(panel) = figure.panel(0) else { return; };
+        let mut values = vec![
+            (FieldId::FigureWidth, format!("{:.3}", figure.size.width)),
+            (FieldId::FigureHeight, format!("{:.3}", figure.size.height)),
+            (FieldId::FigureFontSize, format!("{:.1}", figure.style.base_font_size)),
+            (FieldId::FigureTickSize, format!("{:.1}", panel.x.tick_label_size)),
+            (FieldId::LegendFontSize, format!("{:.1}", panel.legend.font_size)),
+            (FieldId::AxisXLabel, panel.x.label.clone()),
+            (FieldId::AxisYLabel, panel.y.label.clone()),
+            (FieldId::AxisXRange, widgets::format_range(panel.x.range)),
+            (FieldId::AxisYRange, widgets::format_range(panel.y.range)),
+        ];
+        for (index, series) in panel.series.iter().enumerate() {
+            values.push((FieldId::LegendLabel(index), panel.legend.labels.get(&series.id)
+                .cloned().unwrap_or_else(|| series.label.clone())));
+        }
+        if let Some(contour) = &panel.contour {
+            values.push((FieldId::ContourMin, format!("{:.4}", contour.limits.min)));
+            values.push((FieldId::ContourMax, format!("{:.4}", contour.limits.max)));
+            values.push((FieldId::ContourLevels, contour.levels.iter()
+                .map(|level| format!("{level:.4}")).collect::<Vec<_>>().join(", ")));
+        }
+        for (id, text) in values { self.fields.set(id, text, window, cx); }
+    }
+
+    pub fn set_series_marker(&mut self, id: ta_core::SeriesId, marker: MarkerShape) {
+        self.edit_series(id, |series| {
+            series.style.marker = marker;
+            if marker != MarkerShape::None && matches!(series.kind, SeriesKind::Line | SeriesKind::Step | SeriesKind::Bars) {
+                series.kind = SeriesKind::LineMarkers;
+            } else if marker == MarkerShape::None && matches!(series.kind, SeriesKind::Markers | SeriesKind::LineMarkers | SeriesKind::Scatter) {
+                series.kind = SeriesKind::Line;
+            }
+        });
+    }
+
+    pub fn set_series_kind(&mut self, id: ta_core::SeriesId, kind: SeriesKind) {
+        self.edit_series(id, |series| {
+            series.kind = kind;
+            if matches!(kind, SeriesKind::Markers | SeriesKind::LineMarkers | SeriesKind::Scatter)
+                && series.style.marker == MarkerShape::None {
+                series.style.marker = MarkerShape::Circle;
+            }
+        });
+    }
+
     /// The panel the preview draws, with its series resolved to numbers.
     pub fn studio_preview(&self) -> Option<PlateContent> {
         let figure = self.session.studio.as_ref()?;
@@ -423,12 +477,33 @@ impl Workspace {
         // contour's isolines, or the curve the plate drew. The *panel* stays the
         // figure's own — it is the thing the editor's controls change, and a
         // contour has no series precisely because its field is the matrix.
-        if content.series.is_empty() {
-            let spec = plates::contour_spec(&self.session);
-            let fresh = plates::content(&self.session, self.current_plate, &spec);
+        if let Some(spec) = &panel.contour {
+            let fresh = plates::contour_content(&self.session, spec);
+            content.panel.x.range = content.panel.x.range.or(fresh.panel.x.range);
+            content.panel.y.range = content.panel.y.range.or(fresh.panel.y.range);
             content.series = fresh.series;
+        } else if panel.series.is_empty() {
+            let spec = plates::contour_spec(&self.session);
+            content.series = plates::content(&self.session, self.current_plate, &spec).series;
         }
+        let fitted = ta_plot::export::fit_panel(&content.panel, &content.series);
+        content.panel.x.range = content.panel.x.range.or(Some(fitted.0));
+        content.panel.y.range = content.panel.y.range.or(Some(fitted.1));
         Some(content)
+    }
+
+    pub(crate) fn studio_contour_source(&self) -> Option<std::rc::Rc<ta_plot_gpui::HeatmapSource>> {
+        let spec = self.studio_figure()?.panel(0)?.contour.clone()?;
+        let source = self.contour_source.as_ref()?;
+        Some(std::rc::Rc::new(ta_plot_gpui::HeatmapSource {
+            wavelength: source.wavelength.clone(),
+            delay: source.delay.clone(),
+            matrix: source.matrix.clone(),
+            spec,
+            sampling: source.sampling,
+            background: source.background,
+            source: source.source,
+        }))
     }
 
     /// The page controls above the preview: zoom out, the percentage, zoom in,
@@ -453,15 +528,15 @@ impl Workspace {
                 ElementId::Name("preview-zoom-out".into()),
                 false,
                 cx,
-                |workspace, _, _| workspace.zoom_preview(1.2),
-            ))
+                |workspace, _, _| workspace.zoom_preview(1.0 / 1.2),
+            ).disabled(zoom <= 20.0))
             .child(widgets::action_id(
                 "+  Zoom in",
                 ElementId::Name("preview-zoom-in".into()),
                 false,
                 cx,
-                |workspace, _, _| workspace.zoom_preview(1.0 / 1.2),
-            ))
+                |workspace, _, _| workspace.zoom_preview(1.2),
+            ).disabled(zoom >= 800.0))
             .child(widgets::action_id(
                 "Fit to pane",
                 ElementId::Name("preview-fit".into()),
@@ -503,12 +578,14 @@ impl Workspace {
 
     /// The studio's export actions: the figure, and its numbers.
     pub fn export_studio(&mut self, format: ExportFormat) {
-        let Some(figure) = self.session.studio.clone() else {
+        let Some(mut figure) = self.session.studio.clone() else {
             return;
         };
         let Some(content) = self.studio_preview() else {
             return;
         };
+        figure.panels[0] = content.panel.clone();
+        figure.export.format = format;
         let directory = self.export_directory();
         let stem = slug(&figure.title);
         let path = directory.join(format!("{stem}.{}", extension(format)));
@@ -516,7 +593,7 @@ impl Workspace {
         let mut panels = vec![ta_plot::export::ExportPanel::new(0, series.clone())];
         let (figure_width, figure_height) = ta_plot::export::figure_points(&figure);
         if self.current_plate == crate::session::PlateId::Contour {
-            if let Some(source) = &self.contour_source {
+            if let Some(source) = self.studio_contour_source() {
                 let x_scale = ta_plot::Scale::new(figure.panels[0].x.scale).unwrap_or_default();
                 let y_scale = ta_plot::Scale::new(figure.panels[0].y.scale).unwrap_or_default();
                 let layout = ta_plot::PanelLayout::compute(
@@ -529,8 +606,8 @@ impl Workspace {
                     (figure_width, figure_height),
                 );
                 let (plot_width, plot_height) = layout.plot_size();
-                let (x_range, y_range) = self.plate_window();
-                if let Some(layer) = source.layer(
+                let (x_range, y_range) = self.studio_window();
+                if let Some(layer) = source.layer_with_scales(
                     &mut self.raster.borrow_mut(),
                     (
                         plot_width.round().max(2.0) as u32,
@@ -538,6 +615,8 @@ impl Workspace {
                     ),
                     x_range,
                     y_range,
+                    x_scale,
+                    y_scale,
                 ) {
                     panels = vec![ta_plot::export::ExportPanel::new(0, series)
                         .with_heatmap((*layer).clone())];
@@ -545,7 +624,13 @@ impl Workspace {
             }
         }
         // §17.11: the export is checked before it is written, not after.
-        match ta_plot::export::audit(&figure, &panels) {
+        let report = ta_plot::export::audit(&figure, &panels).map(|mut report| {
+            if self.studio_visible_only {
+                report.issues.retain(|issue| issue.kind != ta_plot::export::ExportIssueKind::ClippedSeries);
+            }
+            report
+        });
+        match report {
             Ok(report) if report.is_clean() => {
                 match ta_plot::export::export(&figure, panels, &path) {
                     Ok(()) => self
@@ -593,7 +678,7 @@ impl Workspace {
             else {
                 return;
             };
-            let (x_range, y_range) = self.plate_window();
+            let (x_range, y_range) = self.studio_window();
             let rows: Vec<usize> = (0..wavelength.len())
                 .filter(|row| {
                     !visible_only
@@ -711,8 +796,11 @@ impl Workspace {
         std::env::temp_dir()
     }
 
-    fn plate_window(&self) -> ((f64, f64), (f64, f64)) {
-        state_window_of(&self.plates, 0)
+    fn studio_window(&self) -> ((f64, f64), (f64, f64)) {
+        let (x, y) = state_window_of(&self.plates, 0);
+        self.studio_figure().and_then(|figure| figure.panel(0))
+            .map(|panel| (panel.x.range.unwrap_or(x), panel.y.range.unwrap_or(y)))
+            .unwrap_or((x, y))
     }
 }
 
@@ -932,16 +1020,21 @@ impl Workspace {
     pub fn apply_style_preset(&mut self, name: &str) {
         let Some((_, style)) = style_presets()
             .into_iter()
-            .find(|(candidate, _)| candidate == name)
+            .find(|(candidate, _)| *candidate == name)
         else {
             return;
         };
         if let Some(figure) = self.session.studio.as_mut() {
-            let preset = style.preset;
+            let preset = figure.style.preset;
             figure.style = style;
             // The preset sets the type; the size preset keeps the geometry.
             figure.style.preset = preset;
             for panel in &mut figure.panels {
+                for series in &mut panel.series {
+                    series.style.width = figure.style.series_width;
+                }
+                panel.x.grid = figure.style.grid;
+                panel.y.grid = figure.style.grid;
                 panel.x.title_size = figure.style.axis_title_size;
                 panel.x.tick_label_size = figure.style.tick_label_size;
                 panel.y.title_size = figure.style.axis_title_size;
@@ -997,6 +1090,9 @@ mod tests {
         workspace.open_studio(crate::session::PlateId::Kinetics);
 
         let figure = workspace.studio_figure().expect("the studio is open");
+        assert!(figure.title.contains("Kinetics at"));
+        assert_eq!(figure.panels.len(), 1);
+        assert_eq!(figure.size.width, 3.25);
         // The working plate's type is larger than a figure's.
         let plate_type = crate::plates::style().tick_label_size;
         assert!(plate_type > figure.style.tick_label_size);
@@ -1043,7 +1139,7 @@ mod tests {
         assert_eq!(styles.len(), 5);
         let (_, nature) = styles
             .iter()
-            .find(|(name, _)| name == "Nature")
+            .find(|(name, _)| *name == "Nature")
             .expect("the Nature preset exists");
         assert_eq!(nature.font_family, "Arial");
         assert!(!nature.frame);

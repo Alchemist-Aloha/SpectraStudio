@@ -13,7 +13,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::Sizable;
 use gpui_kit::{
     div, px, App, AppContext, Context, Entity, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window,
+    ParentElement, SharedString, Styled, Window,
 };
 use std::collections::HashMap;
 
@@ -69,6 +69,7 @@ pub enum FieldId {
 #[derive(Default)]
 pub struct Fields {
     map: HashMap<FieldId, Entity<InputState>>,
+    programmatic: HashMap<FieldId, String>,
 }
 
 impl Fields {
@@ -92,8 +93,13 @@ impl Fields {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let text = text.into();
+        if self.holds(id, text.as_ref(), cx) {
+            return;
+        }
         if let Some(state) = self.map.get(&id) {
-            state.update(cx, |state, cx| state.set_value(text.into(), window, cx));
+            self.programmatic.insert(id, text.to_string());
+            state.update(cx, |state, cx| state.set_value(text, window, cx));
         }
     }
 
@@ -104,6 +110,14 @@ impl Fields {
             .get(&id)
             .map(|state| state.read(cx).value().as_ref() == text)
             .unwrap_or(false)
+    }
+
+    fn is_programmatic_change(&mut self, id: FieldId, text: &str) -> bool {
+        if self.programmatic.get(&id).is_some_and(|value| value == text) {
+            return true;
+        }
+        self.programmatic.remove(&id);
+        false
     }
 
     fn insert(&mut self, id: FieldId, state: Entity<InputState>) -> Entity<InputState> {
@@ -127,6 +141,7 @@ impl Workspace {
             return state.clone();
         }
         let value: String = value.into();
+        self.fields.programmatic.insert(id, value.clone());
         let state = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         if !value.is_empty() {
             state.update(cx, |state, cx| state.set_value(value, window, cx));
@@ -142,6 +157,10 @@ impl Workspace {
                             .get(id)
                             .map(|state| state.read(cx).value().to_string())
                             .unwrap_or_default();
+                        if matches!(event, InputEvent::Change)
+                            && workspace.fields.is_programmatic_change(id, &text) {
+                            return;
+                        }
                         workspace.on_field_change(id, &text, cx);
                     }
                     InputEvent::Blur | InputEvent::Focus => {}
@@ -197,6 +216,7 @@ impl Workspace {
 /// One line of a panel: a small-caps label over its value.
 pub fn field(label: &str, value: impl IntoElement) -> impl IntoElement {
     div()
+        .id(gpui_kit::ElementId::Name(format!("field-{label}").into()))
         .flex()
         .flex_col()
         .gap_1()
@@ -253,21 +273,29 @@ pub fn action_id(
     accent: bool,
     cx: &mut Context<Workspace>,
     run: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
-) -> impl IntoElement {
+) -> gpui_kit::base::Button {
     let color = if accent { ink::accent() } else { ink::text() };
     let border = if accent { ink::accent() } else { ink::rule() };
     let run = std::rc::Rc::new(run);
-    div()
-        .id(id)
+    gpui_kit::base::Button::new(id)
+        .accessibility_label(label)
+        .styles(|styles| styles.disabled(|style| style.text_color(ink::muted()).border_color(ink::hair())))
+        .flex_shrink_0()
+        .cursor_pointer()
+        .h(px(24.0))
+        .px_1()
         .text_size(px(11.5))
         .text_color(color)
         .border_b_1()
         .border_color(border)
         .pb(px(1.0))
-        .hover(move |style| style.text_color(ink::accent()))
+        .hover(move |style| style.text_color(ink::accent()).bg(ink::ground()))
+        .focus(|style| style.border_b_2().border_color(ink::accent()).bg(ink::ground()))
         .child(label)
         .on_click(cx.listener(move |workspace, _event, window, cx| {
             run(workspace, window, cx);
+            workspace.touch();
+            workspace.sync_studio_fields(window, cx);
             cx.notify();
         }))
 }
@@ -288,10 +316,15 @@ pub fn choice(
     active: bool,
     cx: &mut Context<Workspace>,
     run: impl Fn(&mut Workspace) + 'static,
-) -> impl IntoElement {
+) -> gpui_kit::base::Button {
     let run = std::rc::Rc::new(run);
-    div()
-        .id(gpui_kit::ElementId::Name(label.into()))
+    gpui_kit::base::Button::new(gpui_kit::ElementId::Name(label.into()))
+        .accessibility_label(label)
+        .selected(active)
+        .styles(|styles| styles.disabled(|style| style.text_color(ink::muted()).bg(ink::ground()).border_color(ink::hair())))
+        .cursor_pointer()
+        .flex_shrink_0()
+        .min_h(px(28.0))
         .px_2()
         .py_1()
         .text_size(px(11.0))
@@ -299,9 +332,13 @@ pub fn choice(
         .bg(if active { ink::accent() } else { ink::paper() })
         .border_1()
         .border_color(if active { ink::accent() } else { ink::rule() })
+        .hover(|style| style.border_color(ink::accent()))
+        .focus(|style| style.border_2().border_color(ink::accent()))
         .child(label)
-        .on_click(cx.listener(move |workspace, _event, _window, cx| {
+        .on_click(cx.listener(move |workspace, _event, window, cx| {
             run(workspace);
+            workspace.touch();
+            workspace.sync_studio_fields(window, cx);
             cx.notify();
         }))
 }
@@ -317,8 +354,11 @@ pub fn switch(
     Checkbox::new(gpui_kit::ElementId::Name(label.into()))
         .label(label)
         .checked(checked)
+        .small()
+        .text_size(px(11.5))
         .on_click(cx.listener(move |workspace, _checked: &bool, _window, cx| {
             run(workspace);
+            workspace.touch();
             cx.notify();
         }))
 }
@@ -412,8 +452,8 @@ pub fn parse_intervals(text: &str) -> Vec<(f64, f64)> {
 /// The text a range is shown as.
 pub fn format_range(range: Option<(f64, f64)>) -> String {
     match range {
-        Some((low, high)) if high.is_finite() => format!("{low:.4} {high:.4}"),
-        Some((low, _)) => format!("{low:.4}"),
+        Some((low, high)) if high.is_finite() => format!("{low} {high}"),
+        Some((low, _)) => format!("{low}"),
         None => String::new(),
     }
 }
@@ -463,6 +503,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn programmatic_field_refresh_is_not_a_rounded_user_edit() {
+        let mut fields = Fields::default();
+        fields.programmatic.insert(FieldId::AxisXRange, "0.0000 1.0000".into());
+        assert!(fields.is_programmatic_change(FieldId::AxisXRange, "0.0000 1.0000"));
+        assert!(fields.is_programmatic_change(FieldId::AxisXRange, "0.0000 1.0000"));
+        assert!(!fields.is_programmatic_change(FieldId::AxisXRange, "0.0010 1.0000"));
+        assert!(!fields.is_programmatic_change(FieldId::AxisXRange, "0.0000 1.0000"));
+    }
+
+
+    #[test]
     fn a_number_may_be_written_with_a_comma() {
         assert_eq!(parse_number(" 1,5 "), Some(1.5));
         assert_eq!(parse_number("-0.25"), Some(-0.25));
@@ -505,7 +556,9 @@ mod tests {
 
     #[test]
     fn a_range_round_trips_through_its_text() {
-        assert_eq!(format_range(Some((-1.0, 10.0))), "-1.0000 10.0000");
+        assert_eq!(format_range(Some((-1.0, 10.0))), "-1 10");
+        let precise = (0.000000013, 1.23456789);
+        assert_eq!(parse_range(&format_range(Some(precise))), Some(precise));
         assert_eq!(format_range(None), "");
         assert_eq!(parse_range("-1 10"), Some((-1.0, 10.0)));
         assert_eq!(format_intervals(&[(0.0, 1.0)]), "0.0000 1.0000");

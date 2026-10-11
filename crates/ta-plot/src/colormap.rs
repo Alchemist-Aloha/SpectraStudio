@@ -43,6 +43,8 @@ pub struct RasterRequest<'a> {
     /// The physical window being shown.
     pub x_range: (f64, f64),
     pub y_range: (f64, f64),
+    pub x_scale: crate::Scale,
+    pub y_scale: crate::Scale,
     /// The output size in pixels.
     pub width: usize,
     pub height: usize,
@@ -104,11 +106,19 @@ pub struct RasterKey {
     pub colormap: (String, bool),
     pub sampling: &'static str,
     pub levels: Vec<u64>,
+    pub scales: ((u8, u64), (u8, u64)),
 }
 
 impl RasterKey {
     pub fn of(request: &RasterRequest<'_>, sampling: RasterSampling, levels: &[f64]) -> Self {
+        let scale_key = |scale| match scale {
+            crate::Scale::Linear => (0, 0),
+            crate::Scale::Logarithmic => (1, 0),
+            crate::Scale::SymmetricLogarithmic { linear_width } => (2, linear_width.to_bits()),
+            crate::Scale::SplitLinearLog { break_at } => (3, break_at.to_bits()),
+        };
         Self {
+            scales: (scale_key(request.x_scale), scale_key(request.y_scale)),
             source: request
                 .source
                 .map(|(dataset, version)| {
@@ -261,18 +271,12 @@ pub fn rasterise(request: &RasterRequest<'_>) -> Raster {
 
     // The physical coordinate at the centre of each pixel. Screen y runs
     // downwards, so the top row is the high end of the y range.
+    let viewport = crate::PlotViewport::new(request.x_range, request.y_range,
+        request.x_scale, request.y_scale, (width as f64, height as f64));
     let x_positions: Vec<f64> = (0..width)
-        .map(|column| {
-            let t = (column as f64 + 0.5) / width as f64;
-            request.x_range.0 + t * (request.x_range.1 - request.x_range.0)
-        })
-        .collect();
+        .map(|column| viewport.pixel_to_data(column as f64 + 0.5, 0.0).0).collect();
     let y_positions: Vec<f64> = (0..height)
-        .map(|row| {
-            let t = 1.0 - (row as f64 + 0.5) / height as f64;
-            request.y_range.0 + t * (request.y_range.1 - request.y_range.0)
-        })
-        .collect();
+        .map(|row| viewport.pixel_to_data(0.0, row as f64 + 0.5).1).collect();
 
     let x_values = request.grid.x.values();
     let y_values = request.grid.y.values();
@@ -356,6 +360,7 @@ pub fn colour_bar_strip(colormap: &Colormap, width: usize) -> Raster {
             colormap: (colormap.name.clone(), colormap.reversed),
             sampling: "legend",
             levels: Vec::new(),
+            scales: ((0, 0), (0, 0)),
         },
     }
 }
@@ -397,6 +402,8 @@ mod tests {
             source: None,
             x_range: (0.0, 1.0),
             y_range: (0.0, 1.0),
+            x_scale: crate::Scale::Linear,
+            y_scale: crate::Scale::Linear,
             width: 2,
             height: 2,
             limits: ColorLimits {
@@ -410,6 +417,24 @@ mod tests {
             level_count: 4,
             sampling,
         }
+    }
+
+    #[test]
+    fn nonlinear_heatmaps_sample_the_same_physical_coordinates_as_the_axes() {
+        let x = Axis::new(AxisKind::Wavelength, AxisUnit::Nanometer, "x", vec![1.0, 10.0, 100.0]).unwrap();
+        let y = Axis::new(AxisKind::Delay, AxisUnit::Picosecond, "y", vec![0.0, 1.0]).unwrap();
+        let values = ndarray::array![[0.0,0.0],[0.5,0.5],[1.0,1.0]];
+        let grid = ContourGrid::from_matrix(&x, &y, &values).unwrap();
+        let mut request = request(grid, &values, RasterSampling::Nearest);
+        request.x_range = (1.0, 100.0);
+        request.width = 3;
+        request.height = 1;
+        let linear = rasterise(&request);
+        request.x_scale = crate::Scale::Logarithmic;
+        let logarithmic = rasterise(&request);
+        assert_ne!(linear.key, logarithmic.key);
+        assert_ne!(linear.pixels, logarithmic.pixels);
+        assert_eq!(logarithmic.pixel(1,0), [128,128,128,255]);
     }
 
     #[test]

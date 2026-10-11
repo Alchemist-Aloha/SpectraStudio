@@ -28,9 +28,11 @@ fn main() {
     // checks nothing.
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let mut layout = app::Layout::Figure;
+    let mut layout_override = false;
     // `--export` writes the figure and its numbers beside the input and then
     // leaves the studio open, so a scripted run leaves evidence behind.
     let mut plate = session::PlateId::Kinetics;
+    let mut plate_override = false;
     let mut fit = false;
     let mut export = false;
     let mut figure_preset: Option<ta_core::JournalPreset> = None;
@@ -40,6 +42,7 @@ fn main() {
     while index < arguments.len() {
         match arguments[index].as_str() {
             "--layout" => {
+                layout_override = true;
                 if let Some(value) = arguments.get(index + 1) {
                     layout = match value.as_str() {
                         "compare" => app::Layout::Compare,
@@ -51,6 +54,7 @@ fn main() {
                 index += 2;
             }
             "--plate" => {
+                plate_override = true;
                 if let Some(value) = arguments.get(index + 1) {
                     plate = match value.as_str() {
                         "a" => session::PlateId::Contour,
@@ -90,8 +94,22 @@ fn main() {
             }
         }
     }
-    gpui_kit::application().run(move |cx| {
+    gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
+        use gpui_kit::component::{Theme, ThemeMode};
+        Theme::change(ThemeMode::Light, None, cx);
+        Theme::update(cx, |theme| {
+            theme.primary = app::ink::accent();
+            theme.primary_foreground = app::ink::paper();
+            theme.foreground = app::ink::text();
+            theme.background = app::ink::paper();
+            theme.muted = app::ink::ground();
+            theme.muted_foreground = app::ink::muted();
+            theme.border = app::ink::rule();
+            theme.input = app::ink::rule();
+            theme.ring = app::ink::accent();
+            theme.radius = px(0.0);
+        });
         app::Workspace::bind_shortcuts(cx);
         let initial = initial.clone();
         gpui_kit::open_window(
@@ -114,8 +132,10 @@ fn main() {
                 for argument in &initial {
                     workspace.open_path(std::path::Path::new(argument));
                 }
+                let layout = if layout_override { layout } else { workspace.layout };
+                let plate = if plate_override { plate } else { workspace.current_plate };
                 workspace.current_plate = plate;
-                if layout == app::Layout::Studio {
+                if layout == app::Layout::Studio && workspace.session.studio.is_none() {
                     workspace.open_studio(plate);
                 } else {
                     workspace.layout = layout;
@@ -148,7 +168,11 @@ fn main() {
                 if export {
                     // A scripted check of the export path: the same actions the
                     // export bar runs, without a pointer to click them with.
-                    workspace.open_studio(plate);
+                    if layout == app::Layout::Compare {
+                        workspace.open_comparison_studio(plate == session::PlateId::Spectra);
+                    } else {
+                        workspace.open_studio(plate);
+                    }
                     let format = workspace
                         .session
                         .studio
@@ -182,4 +206,14 @@ fn main() {
         )
         .expect("failed to open the window");
     });
+}
+
+#[cfg(test)]
+mod ui_asset_tests {
+    use gpui_kit::AssetSource;
+
+    #[test]
+    fn checkbox_mark_is_bundled_for_offline_desktop_use() {
+        assert!(gpui_kit::assets::Assets.load("icons/check.svg").unwrap().is_some());
+    }
 }

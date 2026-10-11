@@ -1,5 +1,9 @@
 # UX review and improvement pass
 
+> Historical pass. See [the subsequent autonomous audit](ux-autonomous-report.md)
+> for current verification, implemented fixes and remaining workflow blockers.
+> In particular, PDF export is not implemented despite earlier product descriptions.
+
 Scope: the four workspaces of Spectra Studio (Figure, Compare, FigureStudio,
 FitWorkbench) plus the shared shell — header, plate index, captions, inspector,
 footer. Reviewed against the running release binary with the repository's own

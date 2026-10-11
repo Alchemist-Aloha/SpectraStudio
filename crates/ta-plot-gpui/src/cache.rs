@@ -36,6 +36,14 @@ impl HeatmapSource {
         x_range: (f64, f64),
         y_range: (f64, f64),
     ) -> Option<Arc<HeatmapLayer>> {
+        self.layer_with_scales(cache, pixels, x_range, y_range, ta_plot::Scale::Linear, ta_plot::Scale::Linear)
+    }
+
+    pub fn layer_with_scales(
+        &self, cache: &mut HeatmapCache, pixels: (u32, u32),
+        x_range: (f64, f64), y_range: (f64, f64),
+        x_scale: ta_plot::Scale, y_scale: ta_plot::Scale,
+    ) -> Option<Arc<HeatmapLayer>> {
         let Ok(grid) = ContourGrid::from_matrix(&self.wavelength, &self.delay, &self.matrix) else {
             return None;
         };
@@ -47,6 +55,8 @@ impl HeatmapSource {
             source: self.source,
             x_range,
             y_range,
+            x_scale,
+            y_scale,
             width,
             height,
             limits: self.spec.limits.clone(),

@@ -10,7 +10,7 @@ use crate::app::{ink, Workspace};
 use crate::plates::{self, PlateContent};
 use crate::widgets::{self, FieldId};
 use crate::session::Session;
-use gpui_kit::{div, px, AnyElement, Context, IntoElement, ParentElement, Styled, Window};
+use gpui_kit::{div, px, AnyElement, Context, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Window};
 use ta_core::{
     kinetic_trace, CoreError, FitModelKind, FitParameter, FitResult, Result, SeriesKind,
     SeriesStyle, Trace, TraceSelection, Weighting,
@@ -84,6 +84,10 @@ pub fn active_parameters(parameters: &[FitParameter]) -> Vec<&FitParameter> {
     parameters.iter().filter(|parameter| !parameter.fixed).collect()
 }
 
+fn component_slot(name: &str) -> Option<u8> {
+    name.strip_prefix("amplitude_").or_else(|| name.strip_prefix("lifetime_"))?.parse().ok()
+}
+
 impl FitSession {
     /// Rebuilds the parameter list when the component count or the model
     /// changes, keeping the values the user has already typed.
@@ -99,7 +103,9 @@ impl FitSession {
                 parameter.value = existing.value;
                 parameter.min = existing.min;
                 parameter.max = existing.max;
-                parameter.fixed = existing.fixed;
+                if component_slot(&parameter.name).is_none_or(|slot| slot <= self.components.min(components)) {
+                    parameter.fixed = existing.fixed;
+                }
             }
         }
         self.parameters = fresh;
@@ -349,7 +355,11 @@ impl Workspace {
             .and_then(|fit| fit.result.clone());
         let mut rows: Vec<AnyElement> = Vec::new();
         let editing = self.fit_edit_parameters;
+        let components = self.session.fit.as_ref().map(|fit| fit.components).unwrap_or(2);
         for (index, parameter) in parameters.iter().enumerate() {
+            if component_slot(&parameter.name).is_some_and(|slot| slot > components) {
+                continue;
+            }
             let name = parameter.name.clone();
             let unit = parameter.unit.clone().unwrap_or_default();
             let fixed = parameter.fixed;
@@ -398,20 +408,21 @@ impl Workspace {
                     .border_color(ink::hair())
                     .child(
                         div()
-                            .w(px(132.0))
+                            .w(px(112.0))
+                            .flex_shrink_0()
                             .text_size(px(11.0))
                             .text_color(if at_bound { ink::amber() } else { ink::text() })
                             .child(name),
                     )
                     .child(if editing {
-                        widgets::number_input(&value_state, 92.0).into_any_element()
+                        widgets::number_input(&value_state, 84.0).into_any_element()
                     } else {
-                        div().w(px(92.0)).into_any_element()
+                        div().into_any_element()
                     })
                     .child(if editing {
-                        widgets::number_input(&bounds_state, 118.0).into_any_element()
+                        widgets::number_input(&bounds_state, 106.0).into_any_element()
                     } else {
-                        div().w(px(118.0)).into_any_element()
+                        div().into_any_element()
                     })
                     .child(if editing {
                         widgets::switch("fixed", fixed, cx, move |workspace| {
@@ -424,7 +435,8 @@ impl Workspace {
                         .into_any_element()
                     } else {
                         div()
-                            .w(px(56.0))
+                            .w(px(48.0))
+                            .flex_shrink_0()
                             .text_size(px(10.0))
                             .text_color(ink::muted())
                             .child(if fixed { "fixed" } else { "free" })
@@ -432,7 +444,8 @@ impl Workspace {
                     })
                     .child(
                         div()
-                            .w(px(46.0))
+                            .w(px(32.0))
+                            .flex_shrink_0()
                             .text_size(px(10.0))
                             .text_color(ink::muted())
                             .child(if !unit.is_empty() { unit } else { String::new() }),
@@ -473,37 +486,44 @@ impl Workspace {
                     .border_color(ink::rule())
                     .child(
                         div()
-                            .w(px(132.0))
+                            .w(px(112.0))
+                            .flex_shrink_0()
                             .text_size(px(10.0))
                             .text_color(ink::muted())
                             .child("PARAMETER"),
                     )
+                    .child(if editing {
+                        div().w(px(84.0)).flex_shrink_0().text_size(px(10.0))
+                            .text_color(ink::muted()).child("START").into_any_element()
+                    } else {
+                        div().into_any_element()
+                    })
+                    .child(if editing {
+                        div().w(px(106.0)).flex_shrink_0().text_size(px(10.0))
+                            .text_color(ink::muted()).child("BOUNDS").into_any_element()
+                    } else {
+                        div().into_any_element()
+                    })
                     .child(
                         div()
-                            .w(px(92.0))
-                            .text_size(px(10.0))
-                            .text_color(ink::muted())
-                            .child("START"),
-                    )
-                    .child(
-                        div()
-                            .w(px(118.0))
-                            .text_size(px(10.0))
-                            .text_color(ink::muted())
-                            .child("BOUNDS"),
-                    )
-                    .child(
-                        div()
-                            .w(px(56.0))
+                            .w(px(48.0))
+                            .flex_shrink_0()
                             .text_size(px(10.0))
                             .text_color(ink::muted())
                             .child("STATE"),
                     )
+                    .child(div().w(px(32.0)).flex_shrink_0().text_size(px(10.0))
+                        .text_color(ink::muted()).child("UNIT"))
                     .child(
                         div()
                             .text_size(px(10.0))
                             .text_color(ink::muted())
-                            .child("FITTED (Δ FROM A BOUND IN AMBER)"),
+                            .id("fit-result-heading")
+                            .child("FITTED")
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("FITTED (Δ FROM A BOUND IN AMBER)")
+                                    .build(window, cx)
+                            }),
                     ),
             )
             .children(rows)
@@ -1147,8 +1167,12 @@ mod tests {
     #[test]
     fn the_parameter_template_follows_the_component_count_and_keeps_typed_values() {
         let mut fit = FitSession::default();
+        fit.parameters.iter_mut().find(|parameter| parameter.name == "lifetime_1").unwrap().fixed = true;
         fit.set_components(3);
         assert_eq!(fit.parameters.len(), 13);
+        assert!(fit.parameters.iter().find(|parameter| parameter.name == "lifetime_1").unwrap().fixed);
+        assert!(!fit.parameters.iter().find(|parameter| parameter.name == "amplitude_3").unwrap().fixed);
+        assert!(!fit.parameters.iter().find(|parameter| parameter.name == "lifetime_3").unwrap().fixed);
         let amplitude = fit
             .parameters
             .iter_mut()
@@ -1163,6 +1187,7 @@ mod tests {
             .expect("slot three survives as a fixed slot")
             .fixed);
         fit.set_components(3);
+        assert!(!fit.parameters.iter().find(|parameter| parameter.name == "amplitude_3").unwrap().fixed);
         assert!((fit
             .parameters
             .iter()
@@ -1171,6 +1196,18 @@ mod tests {
             .value
             + 0.7)
             .abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_table_only_offers_parameters_for_the_selected_components() {
+        let fit = FitSession::default();
+        let visible: Vec<_> = fit.parameters.iter().filter(|parameter| {
+            component_slot(&parameter.name).is_none_or(|slot| slot <= fit.components)
+        }).collect();
+        assert_eq!(visible.len(), 9);
+        assert!(visible.iter().any(|parameter| parameter.name == "amplitude_scale"));
+        assert!(!visible.iter().any(|parameter| parameter.name == "lifetime_3"));
+        assert_eq!(fit.parameters.len(), 13, "hidden starting values remain available");
     }
 
     #[test]

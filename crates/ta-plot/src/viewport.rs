@@ -20,6 +20,7 @@ pub struct PlotViewport {
     /// Whether either axis had to move its range onto the part of the domain the
     /// scale can represent.
     domain_clamped: bool,
+    reversed: (bool, bool),
 }
 
 impl PlotViewport {
@@ -40,7 +41,13 @@ impl PlotViewport {
             y_scale,
             pixels: (pixels.0.max(1.0), pixels.1.max(1.0)),
             domain_clamped: x_clamped || y_clamped,
+            reversed: (false, false),
         }
+    }
+
+    pub fn with_reversed(mut self, x: bool, y: bool) -> Self {
+        self.reversed = (x, y);
+        self
     }
 
     pub fn x_range(&self) -> (f64, f64) {
@@ -108,11 +115,14 @@ impl PlotViewport {
         let px = (tx - x_low) / x_span * self.pixels.0;
         // Screen y grows downwards, so the physical maximum sits at the top.
         let py = (1.0 - (ty - y_low) / y_span) * self.pixels.1;
-        Some((px, py))
+        Some((if self.reversed.0 { self.pixels.0 - px } else { px },
+              if self.reversed.1 { self.pixels.1 - py } else { py }))
     }
 
     /// A pixel to a physical coordinate. Always defined inside the drawing area.
     pub fn pixel_to_data(&self, px: f64, py: f64) -> (f64, f64) {
+        let px = if self.reversed.0 { self.pixels.0 - px } else { px };
+        let py = if self.reversed.1 { self.pixels.1 - py } else { py };
         let (x_low, x_high) = self.x_layout_range();
         let (y_low, y_high) = self.y_layout_range();
         let tx = x_low + (px / self.pixels.0) * (x_high - x_low);
@@ -125,6 +135,8 @@ impl PlotViewport {
     ///
     /// `factors` is `(x, y)` so an axis can be zoomed on its own.
     pub fn zoom_at(&mut self, pixel: (f64, f64), factors: (f64, f64)) {
+        let pixel = (if self.reversed.0 { self.pixels.0 - pixel.0 } else { pixel.0 },
+                     if self.reversed.1 { self.pixels.1 - pixel.1 } else { pixel.1 });
         self.x = self.zoom_axis(
             self.x,
             self.x_scale,
@@ -166,6 +178,8 @@ impl PlotViewport {
     /// Moves the window by a pixel delta, the way a drag does: dragging right
     /// moves the data right, which means the window moves left.
     pub fn pan_pixels(&mut self, dx: f64, dy: f64) {
+        let dx = if self.reversed.0 { -dx } else { dx };
+        let dy = if self.reversed.1 { -dy } else { dy };
         self.x = self.pan_axis(self.x, self.x_scale, -dx, self.pixels.0);
         self.y = self.pan_axis(self.y, self.y_scale, dy, self.pixels.1);
     }
@@ -299,6 +313,24 @@ mod tests {
 
     fn viewport() -> PlotViewport {
         PlotViewport::new((-10.0, 10.0), (-1.0, 3.0), Scale::Linear, Scale::Linear, (200.0, 100.0))
+    }
+
+    #[test]
+    fn reversed_axes_keep_drawing_hit_testing_zoom_and_pan_consistent() {
+        let mut reversed = viewport().with_reversed(true, true);
+        assert_eq!(reversed.data_to_pixel(-10.0, -1.0), Some((200.0, 0.0)));
+        let pixel = (140.0, 30.0);
+        let physical = reversed.pixel_to_data(pixel.0, pixel.1);
+        assert_eq!(reversed.data_to_pixel(physical.0, physical.1), Some(pixel));
+        reversed.zoom_at(pixel, (0.5, 0.5));
+        let zoomed = reversed.pixel_to_data(pixel.0, pixel.1);
+        assert!((physical.0 - zoomed.0).abs() < 1e-9);
+        assert!((physical.1 - zoomed.1).abs() < 1e-9);
+        let before = reversed.data_to_pixel(physical.0, physical.1).unwrap();
+        reversed.pan_pixels(10.0, 5.0);
+        let after = reversed.data_to_pixel(physical.0, physical.1).unwrap();
+        assert!((after.0 - before.0 - 10.0).abs() < 1e-9);
+        assert!((after.1 - before.1 - 5.0).abs() < 1e-9);
     }
 
     #[test]

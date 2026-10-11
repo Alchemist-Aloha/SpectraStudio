@@ -298,21 +298,7 @@ pub fn time_zero_content(session: &Session) -> PlateContent {
     panel.y = axis("Time zero", Some("ps"), AxisScale::Linear);
     panel.legend.visible = false;
 
-    let Some(dataset) = session.dataset() else {
-        return PlateContent {
-            panel,
-            series: Vec::new(),
-            records: Vec::new(),
-        };
-    };
-    let curve = dataset
-        .versions
-        .iter()
-        .filter_map(|version| match &version.op {
-            Some(ta_core::ProcessingOp::TimeZero(correction)) => Some(correction.curve.clone()),
-            _ => None,
-        })
-        .next_back();
+    let curve = session.time_zero_curve();
     let Some(curve) = curve else {
         // An axis waiting for a curve: the dataset's own wavelength range, so
         // the empty plate reads as "nothing is set yet" rather than as 0 to 1.
@@ -482,16 +468,6 @@ pub fn cursors(session: &Session, plate: PlateId) -> Vec<ta_plot_gpui::PlotCurso
         PlateId::TimeZero => {}
     }
     cursors
-}
-
-/// The figure a plate exports, with the plate's caption kept as its title so an
-/// exported file says what it is.
-pub fn export_figure(session: &Session, plate: PlateId, spec: &ContourSpec) -> ta_core::FigureModel {
-    let content = content(session, plate, spec);
-    let mut figure = ta_core::FigureModel::single_panel(session.caption(plate));
-    figure.size = ta_core::JournalPreset::JacsSingleColumn.size();
-    figure.panels[0] = content.panel;
-    figure
 }
 
 #[cfg(test)]
@@ -666,12 +642,4 @@ mod tests {
         assert_eq!(spectra[0].axis, AxisKind::Wavelength);
     }
 
-    #[test]
-    fn an_exported_plate_carries_its_caption() {
-        let session = session();
-        let figure = export_figure(&session, PlateId::Kinetics, &contour_spec(&session));
-        assert!(figure.title.contains("Kinetics at"));
-        assert_eq!(figure.panels.len(), 1);
-        assert_eq!(figure.size.width, 3.25);
-    }
 }

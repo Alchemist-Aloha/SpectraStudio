@@ -39,10 +39,13 @@ pub fn save_project(project: &Project, path: &Path) -> ta_core::Result<()> {
     let manifest = serde_json::to_vec(project)
         .map_err(|error| CoreError::invalid(format!("cannot serialise the project: {error}")))?;
 
-    let file = std::fs::File::create(path).map_err(|source| CoreError::Io {
-        path: path.display().to_string(),
-        source,
-    })?;
+    // Write beside the destination so a failed save never truncates the last good project.
+    let temporary = path.with_file_name(format!(".taproject-{}.tmp", uuid::Uuid::new_v4()));
+    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)
+        .map_err(|source| CoreError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
     let mut writer = std::io::BufWriter::new(file);
 
     let write = |writer: &mut std::io::BufWriter<std::fs::File>| -> std::io::Result<()> {
@@ -66,15 +69,23 @@ pub fn save_project(project: &Project, path: &Path) -> ta_core::Result<()> {
         Ok(())
     };
 
-    write(&mut writer).map_err(|source| CoreError::Io {
+    let result = (|| {
+        if let Ok(metadata) = std::fs::metadata(path) {
+            writer.get_ref().set_permissions(metadata.permissions())?;
+        }
+        write(&mut writer)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        drop(writer);
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|source| CoreError::Io {
         path: path.display().to_string(),
         source,
-    })?;
-    writer.flush().map_err(|source| CoreError::Io {
-        path: path.display().to_string(),
-        source,
-    })?;
-    Ok(())
+    })
 }
 
 /// Reads a project and validates every cross-reference before handing it back.
@@ -247,6 +258,40 @@ mod tests {
         assert!(after.blocks[0].data[[0, 1]].is_nan());
         assert_eq!(loaded.project.layout, project.layout);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_save_replaces_a_project_only_after_the_new_file_is_complete() {
+        let mut project = Project::new("before");
+        project.add_dataset(dataset("a"));
+        let path = temp_path("replace.taproject");
+        save_project(&project, &path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        project.schema = PROJECT_SCHEMA + 1;
+        assert!(save_project(&project, &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        project.schema = PROJECT_SCHEMA;
+        project.name = "after".into();
+        save_project(&project, &path).unwrap();
+        assert_eq!(load_project(&path).unwrap().project.name, "after");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // A rename failure also leaves the existing destination intact.
+        let directory = temp_path("rename-failure");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("keep"), b"original").unwrap();
+        assert!(save_project(&project, &directory).is_err());
+        assert_eq!(std::fs::read(directory.join("keep")).unwrap(), b"original");
+        std::fs::remove_dir_all(directory).unwrap();
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

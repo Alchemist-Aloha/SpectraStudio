@@ -675,17 +675,18 @@ fn compute_frame(
             layout.available,
         );
     }
-    let viewport = layout.viewport(state.x_range, state.y_range, x_scale, y_scale);
+    let viewport = layout.viewport(state.x_range, state.y_range, x_scale, y_scale)
+        .with_reversed(scene.panel.x.reversed, scene.panel.y.reversed);
 
     let mut panel = scene.panel.clone();
-    panel.y.grid = show_grid;
-    panel.x.grid = show_grid;
+    panel.y.grid &= show_grid;
+    panel.x.grid &= show_grid;
 
     // The image is built now, when the plot rectangle's size is known, and at
     // exactly that size: Plotters blits a bitmap one pixel per pixel.
     let (plot_width, plot_height) = layout.plot_size();
     let layer: Option<Arc<HeatmapLayer>> = scene.heatmap.as_ref().and_then(|source| {
-        source.layer(
+        source.layer_with_scales(
             &mut heatmap_cache.borrow_mut(),
             (
                 plot_width.round().max(2.0) as u32,
@@ -693,6 +694,8 @@ fn compute_frame(
             ),
             state.x_range,
             state.y_range,
+            x_scale,
+            y_scale,
         )
     });
     // The key the cache built under, kept so the frame can say which image it
