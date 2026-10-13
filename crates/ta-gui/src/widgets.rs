@@ -131,6 +131,42 @@ impl Fields {
 }
 
 impl Workspace {
+    /// A native disclosure that keeps its state when the inspector re-renders.
+    pub fn inspector_section(
+        &self,
+        key: impl Into<String>,
+        title: impl Into<SharedString>,
+        default_open: bool,
+        content: impl IntoElement,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use gpui_kit::component::accordion::Accordion;
+        let key = key.into();
+        let open = self
+            .inspector_sections
+            .get(&key)
+            .copied()
+            .unwrap_or(default_open);
+        Accordion::new(gpui_kit::ElementId::Name(key.clone().into()))
+            .bordered(false)
+            .small()
+            .h_auto()
+            .item(|item| {
+                item.title(title.into())
+                    .open(open)
+                    .bg(ink::ground())
+                    .title_style(gpui_kit::StyleRefinement::default().text_size(px(11.5)))
+                    .content_style(gpui_kit::StyleRefinement::default().px_0())
+                    .hover(|style| style.text_color(ink::accent()))
+                    .child(content)
+            })
+            .on_toggle_click(cx.listener(move |workspace, indices: &[usize], _, cx| {
+                workspace
+                    .inspector_sections
+                    .insert(key.clone(), !indices.is_empty());
+                cx.notify();
+            }))
+    }
     /// The field for `id`, created and subscribed the first time it is asked
     /// for, then reused so the caret and the text survive a re-render.
     pub fn field_state(
@@ -167,20 +203,13 @@ impl Workspace {
     /// Puts a coordinate field back in step with the selection, which is what
     /// a click on a plate is: typing and pointing must not disagree.
     pub fn sync_coordinate_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let wavelengths = if self.session.comparison_wavelengths.is_empty() {
-            self.session
-                .trace
-                .as_ref()
-                .map(|trace| format!("{:.4}", trace.wavelength.coordinate))
-                .unwrap_or_default()
-        } else {
-            self.session
-                .comparison_wavelengths
-                .iter()
-                .map(|value| format!("{value:.4}"))
-                .collect::<Vec<String>>()
-                .join(", ")
-        };
+        let linked = self.session.trace.as_ref().map(|trace| trace.wavelength.coordinate);
+        let wavelengths = self.session.comparison_wavelengths.iter().copied()
+            .filter(|value| Some(*value) != linked)
+            .chain(linked)
+            .map(|value| format!("{value:.4}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let delays = if self.session.comparison_delays.is_empty() {
             self.session
                 .spectrum

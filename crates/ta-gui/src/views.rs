@@ -542,6 +542,288 @@ impl Workspace {
         div().flex().flex_col().children(rows).into_any_element()
     }
 
+    fn selected_line_controls(
+        &mut self,
+        panel: &ta_core::PanelModel,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use gpui_kit::component::{checkbox::Checkbox, Sizable};
+        self.studio_selection
+            .retain(|id| panel.series.iter().any(|series| series.id == *id));
+        let selected: Vec<_> = panel
+            .series
+            .iter()
+            .filter(|series| self.studio_selection.contains(&series.id))
+            .collect();
+        let empty = selected.is_empty();
+        let common = |matches: &dyn Fn(&ta_core::PlotSeries) -> bool| {
+            !empty && selected.iter().all(|series| matches(series))
+        };
+        let rows = panel
+            .series
+            .iter()
+            .enumerate()
+            .map(|(index, series)| {
+                let id = series.id;
+                Checkbox::new(ElementId::Name(format!("select-line-{id}").into()))
+                    .small()
+                    .label(format!("{} · {}", index + 1, short(&series.label)))
+                    .checked(self.studio_selection.contains(&id))
+                    .on_click(cx.listener(move |workspace, checked: &bool, _, cx| {
+                        if *checked {
+                            workspace.studio_selection.insert(id);
+                            workspace
+                                .inspector_sections
+                                .insert("studio-line-style".into(), true);
+                        } else {
+                            workspace.studio_selection.remove(&id);
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let colors = studio::series_colors()
+            .into_iter()
+            .map(|color| {
+                gpui_kit::base::Button::new(ElementId::Name(
+                    format!("selected-color-{}", color.to_hex()).into(),
+                ))
+                .accessibility_label(format!("Selected lines color {}", color.to_hex()))
+                .disabled(empty)
+                .size(px(24.0))
+                .focus(|style| style.border_2().border_color(ink::accent()))
+                .child(studio::swatch(
+                    color,
+                    common(&|series| series.style.color == color),
+                ))
+                .on_click(cx.listener(move |workspace, _, _, cx| {
+                    workspace.edit_selected_series(|series| series.style.color = color);
+                    cx.notify();
+                }))
+                .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let controls =
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .child(widgets::small_caps("Colour"))
+                .child(div().flex().flex_wrap().gap_1().children(colors))
+                .child(widgets::small_caps("Line width · relative adjustment"))
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(
+                            widgets::action_id(
+                                "Thinner",
+                                "selected-thinner".into(),
+                                false,
+                                cx,
+                                |workspace, _, _| {
+                                    workspace.edit_selected_series(|series| {
+                                        series.style.width = (series.style.width - 0.5).max(0.25)
+                                    });
+                                },
+                            )
+                            .disabled(empty),
+                        )
+                        .child(
+                            widgets::action_id(
+                                "Thicker",
+                                "selected-thicker".into(),
+                                false,
+                                cx,
+                                |workspace, _, _| {
+                                    workspace.edit_selected_series(|series| {
+                                        series.style.width = (series.style.width + 0.5).min(8.0)
+                                    });
+                                },
+                            )
+                            .disabled(empty),
+                        ),
+                )
+                .child(widgets::small_caps("Dash"))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .children(studio::dashes().into_iter().map(|(label, dash)| {
+                            widgets::choice(
+                                label,
+                                common(&|series| series.style.dash == dash),
+                                cx,
+                                move |workspace| {
+                                    workspace
+                                        .edit_selected_series(|series| series.style.dash = dash);
+                                },
+                            )
+                            .disabled(empty)
+                            .into_any_element()
+                        })),
+                )
+                .child(widgets::small_caps("Markers"))
+                .child(div().flex().flex_wrap().gap_1().children(
+                    studio::markers().into_iter().map(|(label, marker)| {
+                        widgets::choice(
+                            label,
+                            common(&|series| series.style.marker == marker),
+                            cx,
+                            move |workspace| {
+                                for id in workspace.studio_selection.clone() {
+                                    workspace.set_series_marker(id, marker);
+                                }
+                            },
+                        )
+                        .disabled(empty)
+                        .into_any_element()
+                    }),
+                ))
+                .child(widgets::small_caps("Marker size · relative adjustment"))
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(
+                            widgets::action_id(
+                                "Smaller",
+                                "selected-smaller".into(),
+                                false,
+                                cx,
+                                |workspace, _, _| {
+                                    workspace.edit_selected_series(|series| {
+                                        series.style.marker_size =
+                                            (series.style.marker_size - 1.0).max(1.0)
+                                    });
+                                },
+                            )
+                            .disabled(empty),
+                        )
+                        .child(
+                            widgets::action_id(
+                                "Larger",
+                                "selected-larger".into(),
+                                false,
+                                cx,
+                                |workspace, _, _| {
+                                    workspace.edit_selected_series(|series| {
+                                        series.style.marker_size =
+                                            (series.style.marker_size + 1.0).min(20.0)
+                                    });
+                                },
+                            )
+                            .disabled(empty),
+                        ),
+                )
+                .child(widgets::small_caps("Opacity · relative adjustment"))
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(
+                            widgets::action_id(
+                                "Fainter",
+                                "selected-fainter".into(),
+                                false,
+                                cx,
+                                |workspace, _, _| {
+                                    workspace.edit_selected_series(|series| {
+                                        series.style.opacity = (series.style.opacity - 0.1).max(0.1)
+                                    });
+                                },
+                            )
+                            .disabled(empty),
+                        )
+                        .child(
+                            widgets::action_id(
+                                "Stronger",
+                                "selected-stronger".into(),
+                                false,
+                                cx,
+                                |workspace, _, _| {
+                                    workspace.edit_selected_series(|series| {
+                                        series.style.opacity = (series.style.opacity + 0.1).min(1.0)
+                                    });
+                                },
+                            )
+                            .disabled(empty),
+                        ),
+                )
+                .into_any_element();
+        let targets = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .child(widgets::readout(format!(
+                "{} of {} lines selected",
+                selected.len(),
+                panel.series.len()
+            )))
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .child(widgets::action(
+                        "Select all",
+                        false,
+                        cx,
+                        |workspace, _, _| {
+                            workspace.studio_selection = workspace
+                                .session
+                                .studio
+                                .as_ref()
+                                .and_then(|figure| figure.panel(0))
+                                .map(|panel| panel.series.iter().map(|series| series.id).collect())
+                                .unwrap_or_default();
+                            workspace
+                                .inspector_sections
+                                .insert("studio-line-style".into(), true);
+                        },
+                    ))
+                    .child(widgets::action(
+                        "Clear selection",
+                        false,
+                        cx,
+                        |workspace, _, _| {
+                            workspace.studio_selection.clear();
+                            workspace
+                                .inspector_sections
+                                .insert("studio-line-style".into(), false);
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .id("line-selection-list")
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .max_h(px(96.0))
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+            .child(widgets::readout(
+                "Only the property you change is applied. Other styles stay independent.",
+            ));
+        div()
+            .flex()
+            .flex_col()
+            .child(targets)
+            .child(self.inspector_section(
+                "studio-line-style",
+                "Style selected lines",
+                false,
+                controls,
+                cx,
+            ))
+            .into_any_element()
+    }
+
     /// The properties column: size, series style, axes, legend, contour,
     /// annotations — the sections of §17.3 to §17.9.
     fn studio_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -587,7 +869,8 @@ impl Workspace {
             window,
             cx,
         );
-        sections.push(
+        sections.push(self.inspector_section(
+            "studio-canvas", "Canvas & typography", false,
             div()
                 .flex()
                 .flex_col()
@@ -671,10 +954,12 @@ impl Workspace {
                         .child(widgets::readout("pt legend")),
                 ))
                 .into_any_element(),
-        );
+            cx,
+        ).into_any_element());
 
         // -- figure style (§17.12)
-        sections.push(
+        sections.push(self.inspector_section(
+            "studio-presets", "Appearance presets", false,
             widgets::field(
                 "Figure style",
                 div()
@@ -691,7 +976,8 @@ impl Workspace {
                     })),
             )
             .into_any_element(),
-        );
+            cx,
+        ).into_any_element());
 
         // -- series style (§17.4)
         for (index, series) in panel.series.iter().enumerate() {
@@ -711,12 +997,14 @@ impl Workspace {
                 window,
                 cx,
             );
-            sections.push(
+            sections.push(self.inspector_section(
+                format!("studio-line-{id}"),
+                format!("Line {} · {}", index + 1, short(&series.label)), false,
                 div()
                     .flex()
                     .flex_col()
                     .child(widgets::field(
-                        &format!("Series {} — {}", index + 1, short(&series.label)),
+                        "Style and legend label",
                         div()
                             .flex()
                             .flex_col()
@@ -836,7 +1124,8 @@ impl Workspace {
                             ),
                     ))
                     .into_any_element(),
-            );
+                cx,
+            ).into_any_element());
         }
 
         // -- axes (§17.5)
@@ -868,7 +1157,8 @@ impl Workspace {
             window,
             cx,
         );
-        sections.push(
+        sections.push(self.inspector_section(
+            "studio-axes", "Axes & grid", false,
             div()
                 .flex()
                 .flex_col()
@@ -963,10 +1253,12 @@ impl Workspace {
                         )),
                 ))
                 .into_any_element(),
-        );
+            cx,
+        ).into_any_element());
 
         // -- legend (§17.6)
-        sections.push(
+        sections.push(self.inspector_section(
+            "studio-legend", "Legend", false,
             widgets::field(
                 "Legend",
                 div()
@@ -1027,7 +1319,8 @@ impl Workspace {
                     )),
             )
             .into_any_element(),
-        );
+            cx,
+        ).into_any_element());
 
         // -- the contour's own controls (§17.9)
         if let Some(contour) = panel.contour.clone() {
@@ -1058,7 +1351,8 @@ impl Workspace {
                 cx,
             );
             let colormaps = ["coolwarm", "viridis", "magma", "grayscale"];
-            sections.push(
+            sections.push(self.inspector_section(
+                "studio-contour", "Contour & colour scale", false,
                 div()
                     .flex()
                     .flex_col()
@@ -1143,7 +1437,8 @@ impl Workspace {
                             )),
                     ))
                     .into_any_element(),
-            );
+                cx,
+            ).into_any_element());
         }
 
         // -- annotations (§17.7)
@@ -1207,7 +1502,8 @@ impl Workspace {
                     .into_any_element()
             })
             .collect();
-        sections.push(
+        sections.push(self.inspector_section(
+            "studio-annotations", "Annotations", false,
             div()
                 .flex()
                 .flex_col()
@@ -1243,9 +1539,21 @@ impl Workspace {
                 ))
                 .child(div().flex().flex_col().children(annotations))
                 .into_any_element(),
-        );
+            cx,
+        ).into_any_element());
 
-        div().flex().flex_col().children(sections).into_any_element()
+        let canvas = sections.remove(0);
+        let presets = sections.remove(0);
+        let settings = sections.split_off(panel.series.len());
+        let individual = div().flex().flex_col().children(sections);
+        let lines = self.selected_line_controls(&panel, cx);
+        div().flex().flex_col()
+            .child(self.inspector_section("studio-lines", "Selected lines", true, lines, cx))
+            .child(self.inspector_section("studio-individual", "Individual line settings", false, individual, cx))
+            .children(settings)
+            .child(canvas)
+            .child(presets)
+            .into_any_element()
     }
 
     /// The export row of §17.10 and §18.
@@ -1353,6 +1661,18 @@ impl Workspace {
     }
 
     // -- the studio's editing operations ------------------------------------
+
+    /// Changes only the requested property on the selected curves.
+    pub fn edit_selected_series(&mut self, mut change: impl FnMut(&mut ta_core::PlotSeries)) {
+        if let Some(panel) = self.session.studio.as_mut().and_then(|figure| figure.panel_mut(0)) {
+            for series in &mut panel.series {
+                if self.studio_selection.contains(&series.id) {
+                    change(series);
+                }
+            }
+        }
+        self.touch();
+    }
 
     /// Edits one series of the studio's first panel.
     pub fn edit_series(&mut self, id: ta_core::SeriesId, change: impl FnOnce(&mut ta_core::PlotSeries)) {

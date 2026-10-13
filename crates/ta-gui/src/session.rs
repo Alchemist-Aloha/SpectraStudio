@@ -508,9 +508,12 @@ impl Session {
         self.select_delay(delay)
     }
 
-    /// A wavelength was chosen, from the contour or from the kinetics plate.
+    /// Choosing a wavelength retains the previous trace, with the new one linked on top.
     pub fn select_wavelength(&mut self, wavelength: f64) -> Result<()> {
         let (dataset, version) = self.bench()?;
+        if self.trace.as_ref().is_some_and(|trace| trace.wavelength.coordinate != wavelength) {
+            self.save_current_trace()?;
+        }
         self.trace = Some(TraceSelection::new(
             dataset,
             version,
@@ -719,14 +722,14 @@ impl Session {
         // From the linked curve backwards, so the first sample of each repeated
         // coordinate wins — which is the linked one — then reversed so the
         // linked curve is drawn last again.
-        let mut seen: Vec<usize> = Vec::new();
+        let mut seen: Vec<f64> = Vec::new();
         let mut traces: Vec<Trace> = Vec::new();
         for request in wanted.into_iter().rev() {
-            let index = axis.nearest(request.coordinate).0;
-            if seen.contains(&index) {
+            let key = trace_coordinate_key(axis, &request);
+            if seen.contains(&key) {
                 continue;
             }
-            seen.push(index);
+            seen.push(key);
             let selection = TraceSelection {
                 id: template.id,
                 dataset: template.dataset,
@@ -793,7 +796,7 @@ impl Session {
             return Vec::new();
         };
         let mut records = Vec::new();
-        let mut seen: Vec<usize> = Vec::new();
+        let mut seen: Vec<f64> = Vec::new();
         let wanted: Vec<f64> = self
             .comparison_wavelengths
             .iter()
@@ -801,16 +804,17 @@ impl Session {
             .chain(std::iter::once(template.wavelength.coordinate))
             .collect();
         for coordinate in wanted.into_iter().rev() {
-            let index = axis.nearest(coordinate).0;
-            if seen.contains(&index) {
+            let request = self.sampling.request(coordinate);
+            let key = trace_coordinate_key(axis, &request);
+            if seen.contains(&key) {
                 continue;
             }
-            seen.push(index);
+            seen.push(key);
             let selection = TraceSelection {
                 id: template.id,
                 dataset: template.dataset,
                 version: template.version,
-                wavelength: self.sampling.request(coordinate),
+                wavelength: request,
             };
             if let Ok(trace) = kinetic_trace(dataset, &selection) {
                 records.push(ta_core::PlotSeries::new(
@@ -1093,6 +1097,14 @@ pub struct ChainEntry {
     pub is_active: bool,
 }
 
+/// Nearest/channel sampling shares a measured row; interpolation and windows do not.
+fn trace_coordinate_key(axis: &ta_core::Axis, request: &AxisRequest) -> f64 {
+    match request.mode {
+        SampleMode::Nearest | SampleMode::AverageChannels { .. } => axis.nearest(request.coordinate).1,
+        _ => request.coordinate,
+    }
+}
+
 /// The wavelength carrying the largest mean |ΔA|, which is where a first look
 /// belongs.
 fn strongest_wavelength(dataset: &TaDataset, version: VersionId) -> Option<f64> {
@@ -1284,6 +1296,37 @@ mod tests {
     }
 
     #[test]
+    fn wavelength_selection_accumulates_traces_and_clear_keeps_only_the_link() {
+        let mut session = session();
+        session.select_wavelength(600.0).unwrap();
+        session.select_point(650.0, 1.0).unwrap();
+        assert_eq!(session.kinetics().len(), 3);
+        assert_eq!(session.kinetics_records().len(), 3);
+        session.select_wavelength(600.0).unwrap();
+        session.select_wavelength(600.0).unwrap();
+        assert_eq!(session.kinetics().len(), 3);
+        assert!(session.kinetics().last().unwrap().label.starts_with("600"));
+        session.remove_wavelength(0);
+        assert_eq!(session.kinetics().len(), 2);
+        session.clear_wavelengths();
+        assert_eq!(session.kinetics().len(), 1);
+        assert!(session.current_trace().unwrap().label.starts_with("600"));
+    }
+
+    #[test]
+    fn distinct_interpolated_traces_in_one_channel_are_not_dropped() {
+        let mut session = session();
+        session.set_sampling(Sampling { mode: SampleMode::Interpolated, ..Sampling::default() });
+        session.select_wavelength(520.0).unwrap();
+        session.clear_wavelengths();
+        session.select_wavelength(525.0).unwrap();
+        let curves = session.kinetics();
+        assert_eq!(curves.len(), 2);
+        assert_eq!(session.kinetics_records().len(), 2);
+        assert_ne!(curves[0].signal, curves[1].signal);
+    }
+
+    #[test]
     fn choosing_a_wavelength_moves_the_trace_and_leaves_the_spectrum_alone() {
         let mut session = session();
         let before = session.spectra().last().unwrap().label.clone();
@@ -1469,9 +1512,10 @@ mod tests {
         session.save_current_trace().unwrap();
         session.select_wavelength(500.0).unwrap();
         let curves = session.kinetics();
-        assert_eq!(curves.len(), 2);
-        assert!(curves[0].label.starts_with("600"));
-        assert!(curves[1].label.starts_with("500"));
+        assert_eq!(curves.len(), 3);
+        assert!(curves[0].label.starts_with("550"));
+        assert!(curves[1].label.starts_with("600"));
+        assert!(curves[2].label.starts_with("500"));
     }
 
     #[test]
@@ -1544,7 +1588,7 @@ mod tests {
         assert_eq!(reopened.trace, session.trace);
         assert_eq!(reopened.spectrum, session.spectrum);
         assert_eq!(reopened.sampling, session.sampling);
-        assert_eq!(reopened.comparison_wavelengths, vec![600.0]);
+        assert_eq!(reopened.comparison_wavelengths, vec![550.0, 600.0]);
         assert_eq!(reopened.comparison_delays, vec![10.0]);
         assert_eq!(reopened.current_trace().unwrap().signal, before);
         assert!(!reopened.dirty);

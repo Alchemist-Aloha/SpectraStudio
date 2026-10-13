@@ -201,6 +201,8 @@ pub struct Workspace {
     pub studio_plates: Vec<Plate>,
     /// Whether a data export writes the visible window or everything measured.
     pub studio_visible_only: bool,
+    pub studio_selection: std::collections::HashSet<ta_core::SeriesId>,
+    pub inspector_sections: std::collections::HashMap<String, bool>,
     /// Whether the workbench shows the columns a fit is set up with, or only
     /// the values it produced.
     pub fit_edit_parameters: bool,
@@ -247,6 +249,8 @@ impl Workspace {
             current_plate: PlateId::Kinetics,
             studio_plates: Vec::new(),
             studio_visible_only: true,
+            studio_selection: Default::default(),
+            inspector_sections: Default::default(),
             fit_edit_parameters: true,
             pending_page_zoom: None,
             window_title: String::new(),
@@ -522,11 +526,8 @@ impl Workspace {
         match id {
             FieldId::Wavelength => {
                 let values = crate::widgets::parse_numbers(text);
-                // The last one is the linked trace; the rest are overlays,
-                // which is what "one or more wavelengths" means.
-                self.session.comparison_wavelengths =
-                    values.iter().copied().take(values.len().saturating_sub(1)).collect();
-                if let Some(coordinate) = values.last() {
+                // Each entry adds a trace; the last becomes the highlighted link.
+                for coordinate in &values {
                     if let Err(error) = self.session.select_wavelength(*coordinate) {
                         self.session.status.problem(format!("{error}"));
                     }
@@ -1351,8 +1352,8 @@ impl Workspace {
             .bg(ink::ground())
             .border_l_1()
             .border_color(ink::rule())
-            .child(self.section_label("Selection".to_string()))
-            .child(self.field(
+            .child(self.inspector_section("figure-selection", "Selection", true,
+                div().flex().flex_col().child(self.field(
                 "Wavelengths (nm)",
                 div()
                     .flex()
@@ -1360,7 +1361,7 @@ impl Workspace {
                     .gap_1()
                     .child(widgets::number_input(&wavelength_state, 250.0))
                     .child(widgets::readout(
-                        "the last is the linked trace; the rest are overlaid",
+                        "selections accumulate; the last is highlighted",
                     )),
             ))
             .child(self.field(
@@ -1373,8 +1374,9 @@ impl Workspace {
                     .child(widgets::readout(
                         "the last is the linked spectrum; negatives are kept",
                     )),
-            ))
-            .child(self.field(
+            )), cx))
+            .child(self.inspector_section("figure-sampling", "Sampling & averaging", false,
+                div().flex().flex_col().child(self.field(
                 "Reading",
                 div()
                     .flex()
@@ -1453,8 +1455,9 @@ impl Workspace {
                 .into_any_element()
             } else {
                 div().into_any_element()
-            })
-            .child(self.kept_block(
+            }), cx))
+            .child(self.inspector_section("figure-kinetics", "Kinetics · retained wavelengths", true,
+                self.kept_block(
                 "b",
                 "Kinetics",
                 trace_label.clone(),
@@ -1468,8 +1471,9 @@ impl Workspace {
                     .collect(),
                 true,
                 cx,
-            ))
-            .child(self.kept_block(
+            ), cx))
+            .child(self.inspector_section("figure-spectra", "Spectra · retained delays", false,
+                self.kept_block(
                 "c",
                 "Spectra",
                 self.session
@@ -1485,8 +1489,9 @@ impl Workspace {
                     .collect(),
                 false,
                 cx,
-            ))
-            .child(self.field(
+            ), cx))
+            .child(self.inspector_section("figure-display", "Display options", false,
+                div().flex().flex_col().child(self.field(
                 "Colour limits",
                 widgets::readout(format!(
                     "{:.4} … {:.4} ΔOD, symmetric",
@@ -1511,43 +1516,13 @@ impl Workspace {
                             workspace.touch();
                         },
                     )),
-            )
-            .child(
+            ), cx))
+            .child(self.inspector_section("figure-actions", "Analysis & export", true,
                 div()
                     .flex()
                     .flex_wrap()
                     .gap_2()
                     .p_3()
-                    .child(self.inspector_action("Keep trace", cx, |workspace| {
-                        match workspace.session.save_current_trace() {
-                            Ok(()) => {
-                                let kept = workspace.session.comparison_wavelengths.len();
-                                workspace.session.status.info(format!(
-                                    "the trace is now one of the {kept} curve(s) on (b)"
-                                ));
-                            }
-                            Err(error) => workspace
-                                .session
-                                .status
-                                .problem(format!("{error}")),
-                        }
-                        workspace.touch();
-                    }))
-                    .child(self.inspector_action("Keep spectrum", cx, |workspace| {
-                        match workspace.session.save_current_spectrum() {
-                            Ok(()) => {
-                                let kept = workspace.session.comparison_delays.len();
-                                workspace.session.status.info(format!(
-                                    "the spectrum is now one of the {kept} curve(s) on (c)"
-                                ));
-                            }
-                            Err(error) => workspace
-                                .session
-                                .status
-                                .problem(format!("{error}")),
-                        }
-                        workspace.touch();
-                    }))
                     .child(self.inspector_action("Fit this trace", cx, |workspace| {
                         workspace.open_fit();
                     }))
@@ -1558,8 +1533,8 @@ impl Workspace {
                     .child(self.inspector_action("Reset all views", cx, |workspace| {
                         workspace.reset_all_views();
                     })),
-            )
-            .child(self.shortcut_list())
+                cx))
+            .child(self.inspector_section("figure-keys", "Keyboard shortcuts", false, self.shortcut_list(), cx))
     }
 
     /// One linked plate's selection: what is drawn, how to add another, and the
@@ -2139,9 +2114,50 @@ mod tests {
             window.press("enter", cx);
         }).unwrap();
         cx.run_until_parked();
-        cx.update(|cx| {
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
             assert_eq!(workspace.read(cx).session.trace.as_ref().unwrap().wavelength.coordinate, 650.0);
+            assert_eq!(workspace.read(cx).plates[1].scene.series.len(), 2);
+            let state = workspace.read(cx).fields.get(FieldId::Wavelength).unwrap();
+            assert_eq!(state.read(cx).value().as_ref(), "600.0000, 650.0000");
+            window.press("ctrl-a", cx);
+            window.input("500, 550", cx);
+            window.press("enter", cx);
+        }).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(workspace.read(cx).plates[1].scene.series.len(), 4);
+            assert_eq!(workspace.read(cx).session.kinetics_records().len(), 4);
+            assert!(workspace.read(cx).plates[1].scene.series.last().unwrap().label.starts_with("550"));
+            window.within("figure-kinetics").click("Clear", cx);
+        }).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(workspace.read(cx).plates[1].scene.series.len(), 1);
+            let state = workspace.read(cx).fields.get(FieldId::Wavelength).unwrap();
+            assert_eq!(state.read(cx).value().as_ref(), "550.0000");
+        }).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn inspector_disclosures_toggle_without_changing_analysis(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{test::TestWindowExt, AppContext};
+        let (handle, workspace) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |_, cx| {
+                cx.new(|_| workspace_with_dataset())
+            }).unwrap()
         });
+        for expected in [true, false] {
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.within("figure-sampling").click(("trigger", 0usize), cx);
+            }).unwrap();
+            cx.update(|cx| {
+                assert_eq!(workspace.read(cx).inspector_sections.get("figure-sampling"), Some(&expected));
+                assert_eq!(workspace.read(cx).session.trace.as_ref().unwrap().wavelength.coordinate, 650.0);
+            });
+        }
     }
 
     /// A 4 × 4 matrix whose axes are wide enough to tell a fitted window from
@@ -2299,6 +2315,70 @@ mod tests {
         assert!(workspace.studio_plates[0].scene.panel.y.reversed);
         assert!(workspace.studio_plates[0].scene.style.grid);
         assert_eq!(&original, workspace.session.dataset().unwrap().matrix(version).unwrap());
+    }
+
+    #[gpui_kit::test]
+    fn selected_line_controls_only_change_checked_curves(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{test::TestWindowExt, AppContext};
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (handle, workspace) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |_, cx| {
+                cx.new(|_| {
+                    let mut workspace = workspace_with_dataset();
+                    workspace.keep_current(true);
+                    workspace.session.select_wavelength(500.0).unwrap();
+                    workspace.open_studio(PlateId::Kinetics);
+                    workspace
+                })
+            }).unwrap()
+        });
+        let (id, before) = cx.update(|cx| {
+            let series = &workspace.read(cx).session.studio.as_ref().unwrap().panel(0).unwrap().series;
+            (series[0].id, series.clone())
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(ElementId::Name(format!("select-line-{id}").into()), cx);
+        }).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            assert!(workspace.read(cx).studio_selection.contains(&id));
+            window.click("selected-thicker", cx);
+        }).unwrap();
+        cx.update(|cx| {
+            let series = &workspace.read(cx).session.studio.as_ref().unwrap().panel(0).unwrap().series;
+            assert_eq!(series[0].style.width, before[0].style.width + 0.5);
+            assert_eq!(series[1], before[1]);
+        });
+    }
+
+    #[test]
+    fn selected_line_edits_preserve_other_styles_and_unselected_curves() {
+        let mut workspace = workspace_with_dataset();
+        workspace.keep_current(true);
+        workspace.session.select_wavelength(500.0).unwrap();
+        workspace.keep_current(true);
+        workspace.session.select_wavelength(550.0).unwrap();
+        workspace.open_studio(PlateId::Kinetics);
+        let panel = workspace.session.studio.as_mut().unwrap().panel_mut(0).unwrap();
+        assert_eq!(panel.series.len(), 3);
+        panel.series[0].style.width = 1.0;
+        panel.series[1].style.width = 3.0;
+        panel.series[1].style.dash = ta_core::DashPattern::Dotted;
+        let before = panel.series.clone();
+        workspace.studio_selection.extend([before[0].id, before[1].id]);
+        workspace.edit_selected_series(|series| series.style.width += 0.5);
+        let after = &workspace.session.studio.as_ref().unwrap().panel(0).unwrap().series;
+        for index in 0..2 {
+            let mut expected = before[index].clone();
+            expected.style.width += 0.5;
+            assert_eq!(after[index], expected);
+        }
+        assert_eq!(after[2], before[2]);
+        let after = after.clone();
+        workspace.studio_selection.clear();
+        workspace.edit_selected_series(|series| series.style.dash = ta_core::DashPattern::Dashed);
+        assert_eq!(workspace.session.studio.as_ref().unwrap().panel(0).unwrap().series, after);
     }
 
     #[test]
