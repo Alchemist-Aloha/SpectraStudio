@@ -279,7 +279,7 @@ fn normalization_factor(points: &[(f64, f64)], normalization: Normalization) -> 
             let value = interpolate(points, delay);
             match value {
                 Some(value) if value.abs() > f64::MIN_POSITIVE && value.is_finite() => {
-                    (true, 1.0 / value)
+                    (true, 1.0 / value.abs())
                 }
                 // A reference point that is missing or zero cannot normalize
                 // anything, and dividing by it would invent a curve.
@@ -447,6 +447,22 @@ mod tests {
             assert!((peak - 1.0).abs() < 1e-12, "peak was {peak}");
             assert!(curve.normalized);
         }
+    }
+
+    #[test]
+    fn normalization_preserves_negative_od_and_mixed_signs() {
+        for points in [vec![(0.0, -2.0), (1.0, -4.0)], vec![(0.0, -2.0), (1.0, 4.0)]] {
+            let (normalized, factor) = normalization_factor(&points, Normalization::MaxAbs);
+            assert!(normalized);
+            assert_eq!(points.iter().map(|(_, y)| y * factor).collect::<Vec<_>>(),
+                vec![-0.5, points[1].1.signum()]);
+            let (normalized, factor) = normalization_factor(&points, Normalization::AtDelay(0.0));
+            assert!(normalized);
+            assert_eq!(points[0].1 * factor, -1.0);
+            assert_eq!((points[1].1 * factor).signum(), points[1].1.signum());
+        }
+        assert_eq!(normalization_factor(&[(0.0, 0.0)], Normalization::MaxAbs), (false, 1.0));
+        assert_eq!(normalization_factor(&[(0.0, 0.0)], Normalization::AtDelay(0.0)), (false, 1.0));
     }
 
     #[test]

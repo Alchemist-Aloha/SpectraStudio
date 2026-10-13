@@ -316,9 +316,7 @@ impl Session {
             .as_ref()
             .map(|trace| axis.nearest(trace.wavelength.coordinate).0);
         if Some(index) == linked {
-            return Err(CoreError::invalid(
-                "that wavelength is already the linked trace",
-            ));
+            return self.save_current_trace();
         }
         if self
             .comparison_wavelengths
@@ -350,9 +348,7 @@ impl Session {
             .as_ref()
             .map(|spectrum| axis.nearest(spectrum.delay.coordinate).0);
         if Some(index) == linked {
-            return Err(CoreError::invalid(
-                "that delay is already the linked spectrum",
-            ));
+            return self.save_current_spectrum();
         }
         if self
             .comparison_delays
@@ -371,23 +367,19 @@ impl Session {
         Ok(())
     }
 
-    /// Adds the current selection to the kinetics plate, and moves the
-    /// selection on by one measured sample so a run of them is two clicks each.
+    /// Keeps the linked trace on the kinetics plate when the selection moves.
     pub fn add_current_wavelength(&mut self) -> Result<()> {
-        let coordinate = self
-            .trace
-            .as_ref()
-            .map(|trace| trace.wavelength.coordinate)
-            .ok_or_else(|| CoreError::invalid("no wavelength is selected"))?;
+        let coordinate = self.trace.as_ref()
+            .ok_or_else(|| CoreError::invalid("no wavelength is selected"))?
+            .wavelength.coordinate;
         self.add_wavelength(coordinate)
     }
 
+    /// Keeps the linked spectrum on the spectra plate when the selection moves.
     pub fn add_current_delay(&mut self) -> Result<()> {
-        let coordinate = self
-            .spectrum
-            .as_ref()
-            .map(|spectrum| spectrum.delay.coordinate)
-            .ok_or_else(|| CoreError::invalid("no delay is selected"))?;
+        let coordinate = self.spectrum.as_ref()
+            .ok_or_else(|| CoreError::invalid("no delay is selected"))?
+            .delay.coordinate;
         self.add_delay(coordinate)
     }
 
@@ -1232,6 +1224,27 @@ mod tests {
     }
 
     #[test]
+    fn adding_the_linked_selection_keeps_it_without_duplicates() {
+        let mut session = session();
+        let wavelength = session.trace.as_ref().unwrap().wavelength.coordinate;
+        session.add_current_wavelength().unwrap();
+        session.add_current_wavelength().unwrap();
+        assert_eq!(session.comparison_wavelengths, vec![wavelength]);
+        session.select_wavelength(650.0).unwrap();
+        assert_eq!(session.comparison_wavelengths, vec![wavelength]);
+        assert_eq!(session.kinetics().len(), 2);
+
+        session.clear_delays();
+        let delay = session.spectrum.as_ref().unwrap().delay.coordinate;
+        session.add_current_delay().unwrap();
+        session.add_current_delay().unwrap();
+        assert_eq!(session.comparison_delays, vec![delay]);
+        session.select_delay(10.0).unwrap();
+        assert_eq!(session.comparison_delays, vec![delay]);
+        assert_eq!(session.spectra().len(), 2);
+    }
+
+    #[test]
     fn adding_a_wavelength_twice_adds_it_once() {
         let mut session = session();
         session.add_wavelength(600.0).unwrap();
@@ -1239,8 +1252,10 @@ mod tests {
         // 601 nm snaps to the same measured sample as 600 nm.
         assert!(session.add_wavelength(601.0).is_err());
         assert_eq!(session.comparison_wavelengths.len(), 1);
-        // And the linked trace cannot be kept twice either.
-        assert!(session.add_wavelength(550.0).is_err());
+        // Adding the linked trace pins it, without creating duplicates.
+        session.add_wavelength(550.0).unwrap();
+        session.add_wavelength(550.0).unwrap();
+        assert_eq!(session.comparison_wavelengths.len(), 2);
     }
 
     #[test]

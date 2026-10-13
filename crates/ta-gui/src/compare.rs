@@ -520,7 +520,7 @@ impl Workspace {
                                 |workspace| workspace.session.set_normalization(Normalization::None),
                             ))
                             .child(widgets::choice(
-                                "to maximum",
+                                "max |ΔOD|",
                                 normalization == Normalization::MaxAbs,
                                 cx,
                                 |workspace| {

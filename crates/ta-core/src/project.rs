@@ -21,7 +21,7 @@ pub enum Normalization {
     None,
     /// Divide by the largest magnitude in the visible delay range.
     MaxAbs,
-    /// Normalize each curve to its amplitude at one delay.
+    /// Divide by the amplitude magnitude at one delay, preserving the signal sign.
     AtDelay(f64),
 }
 

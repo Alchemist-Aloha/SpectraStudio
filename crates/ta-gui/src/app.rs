@@ -1662,7 +1662,14 @@ impl Workspace {
                                 workspace.session.add_current_delay()
                             };
                             match outcome {
-                                Ok(()) => workspace.touch(),
+                                Ok(()) => {
+                                    workspace.session.status.info(if kinetics {
+                                        "wavelength kept on the kinetics plate"
+                                    } else {
+                                        "delay kept on the spectra plate"
+                                    });
+                                    workspace.touch();
+                                }
                                 Err(error) => workspace
                                     .session
                                     .status
