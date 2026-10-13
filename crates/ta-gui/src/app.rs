@@ -2094,6 +2094,49 @@ mod tests {
         Axis, AxisKind, AxisUnit, SignalUnit, SourceFormat, TaDataset,
     };
 
+    #[gpui_kit::test]
+    fn rendered_coordinate_inputs_preserve_drafts_until_enter(cx: &mut gpui_kit::TestAppContext) {
+        use crate::widgets::FieldId;
+        use gpui_kit::{test::TestWindowExt, AppContext};
+        let (handle, workspace) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            Workspace::bind_shortcuts(cx);
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |_, cx| {
+                cx.new(|_| workspace_with_dataset())
+            }).unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let state = workspace.read(cx).fields.get(FieldId::Wavelength).unwrap().clone();
+            window.click(("input", state.entity_id()), cx);
+        }).unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            let state = workspace.read(cx).fields.get(FieldId::Wavelength).unwrap().clone();
+            let original = workspace.read(cx).session.trace.as_ref().unwrap().wavelength.coordinate;
+            window.press("ctrl-a", cx);
+            window.input("600", cx);
+            assert_eq!(state.read(cx).value().as_ref(), "600");
+            assert_eq!(workspace.read(cx).session.trace.as_ref().unwrap().wavelength.coordinate, original);
+            window.press("enter", cx);
+        }).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            assert_eq!(workspace.read(cx).session.trace.as_ref().unwrap().wavelength.coordinate, 600.0);
+            window.press("ctrl-a", cx);
+            window.input("650", cx);
+        }).unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            let state = workspace.read(cx).fields.get(FieldId::Wavelength).unwrap();
+            assert_eq!(state.read(cx).value().as_ref(), "650");
+            assert_eq!(workspace.read(cx).session.trace.as_ref().unwrap().wavelength.coordinate, 600.0);
+            window.press("enter", cx);
+        }).unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(workspace.read(cx).session.trace.as_ref().unwrap().wavelength.coordinate, 650.0);
+        });
+    }
+
     /// A 4 × 4 matrix whose axes are wide enough to tell a fitted window from
     /// the empty-state 0…1 box.
     fn dataset() -> TaDataset {

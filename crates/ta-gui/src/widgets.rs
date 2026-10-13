@@ -3,7 +3,8 @@
 //!
 //! Every editable number in the application is an [`InputState`] registered
 //! here under a [`FieldId`], and every one of them reports through the same
-//! handler. One subscription path means typing in a parameter table, a figure
+//! handler, committing on Enter or focus loss, never on a keystroke.
+//! One subscription path means typing in a parameter table, a figure
 //! size or a wavelength cannot behave differently from each other, and it is why
 //! a test can drive the whole interface without a window.
 
@@ -69,7 +70,7 @@ pub enum FieldId {
 #[derive(Default)]
 pub struct Fields {
     map: HashMap<FieldId, Entity<InputState>>,
-    programmatic: HashMap<FieldId, String>,
+    committed: HashMap<FieldId, String>,
 }
 
 impl Fields {
@@ -94,11 +95,11 @@ impl Fields {
         cx: &mut App,
     ) {
         let text = text.into();
+        self.committed.insert(id, text.to_string());
         if self.holds(id, text.as_ref(), cx) {
             return;
         }
         if let Some(state) = self.map.get(&id) {
-            self.programmatic.insert(id, text.to_string());
             state.update(cx, |state, cx| state.set_value(text, window, cx));
         }
     }
@@ -112,12 +113,15 @@ impl Fields {
             .unwrap_or(false)
     }
 
-    fn is_programmatic_change(&mut self, id: FieldId, text: &str) -> bool {
-        if self.programmatic.get(&id).is_some_and(|value| value == text) {
-            return true;
+    fn should_commit(&mut self, id: FieldId, event: &InputEvent, text: &str) -> bool {
+        if !matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur)
+            || self.committed.get(&id).is_some_and(|value| value == text)
+        {
+            return false;
         }
-        self.programmatic.remove(&id);
-        false
+        // Enter followed by blur must not apply the same edit twice.
+        self.committed.insert(id, text.to_string());
+        true
     }
 
     fn insert(&mut self, id: FieldId, state: Entity<InputState>) -> Entity<InputState> {
@@ -141,7 +145,7 @@ impl Workspace {
             return state.clone();
         }
         let value: String = value.into();
-        self.fields.programmatic.insert(id, value.clone());
+        self.fields.committed.insert(id, value.clone());
         let state = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         if !value.is_empty() {
             state.update(cx, |state, cx| state.set_value(value, window, cx));
@@ -150,20 +154,9 @@ impl Workspace {
             &state,
             window,
             move |workspace: &mut Workspace, _state, event: &InputEvent, _window, cx| {
-                match event {
-                    InputEvent::Change | InputEvent::PressEnter { .. } => {
-                        let text = workspace
-                            .fields
-                            .get(id)
-                            .map(|state| state.read(cx).value().to_string())
-                            .unwrap_or_default();
-                        if matches!(event, InputEvent::Change)
-                            && workspace.fields.is_programmatic_change(id, &text) {
-                            return;
-                        }
-                        workspace.on_field_change(id, &text, cx);
-                    }
-                    InputEvent::Blur | InputEvent::Focus => {}
+                let text = workspace.fields.text(id, cx);
+                if workspace.fields.should_commit(id, event, &text) {
+                    workspace.on_field_change(id, &text, cx);
                 }
             },
         )
@@ -202,11 +195,16 @@ impl Workspace {
                 .collect::<Vec<String>>()
                 .join(", ")
         };
-        if !wavelengths.is_empty() && !self.fields.holds(FieldId::Wavelength, &wavelengths, cx) {
+        // Re-renders must preserve a draft; only a changed selection replaces it.
+        if !wavelengths.is_empty()
+            && self.fields.committed.get(&FieldId::Wavelength) != Some(&wavelengths)
+        {
             self.fields
                 .set(FieldId::Wavelength, wavelengths, window, cx);
         }
-        if !delays.is_empty() && !self.fields.holds(FieldId::Delay, &delays, cx) {
+        if !delays.is_empty()
+            && self.fields.committed.get(&FieldId::Delay) != Some(&delays)
+        {
             self.fields.set(FieldId::Delay, delays, window, cx);
         }
         let _ = cx;
@@ -363,11 +361,11 @@ pub fn switch(
         }))
 }
 
-/// A number the user can type, on a hairline rather than in a box.
+/// A compact editable field with a hairline border and native focus feedback.
 pub fn number_input(state: &Entity<InputState>, width: f32) -> impl IntoElement {
     div().w(px(width)).child(
         Input::new(state)
-            .appearance(false)
+            .appearance(true)
             .bordered(true)
             .small()
             .text_size(px(11.5))
@@ -503,13 +501,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn typing_stays_local_until_enter_or_blur() {
+        for id in [FieldId::Wavelength, FieldId::FitValue(0), FieldId::AxisXLabel] {
+            let mut fields = Fields::default();
+            fields.committed.insert(id, "1".into());
+            assert!(!fields.should_commit(id, &InputEvent::Focus, "1"));
+            assert!(!fields.should_commit(id, &InputEvent::Change, ""));
+            assert!(!fields.should_commit(id, &InputEvent::Change, "2"));
+            assert_eq!(fields.committed[&id], "1");
+            assert!(fields.should_commit(
+                id,
+                &InputEvent::PressEnter { secondary: false, shift: false },
+                "2",
+            ));
+            assert!(!fields.should_commit(id, &InputEvent::Blur, "2"));
+            assert!(!fields.should_commit(id, &InputEvent::Change, "3"));
+            assert!(fields.should_commit(id, &InputEvent::Blur, "3"));
+            assert!(!fields.should_commit(id, &InputEvent::Blur, "3"));
+            assert!(fields.should_commit(id, &InputEvent::Blur, ""));
+        }
+    }
+
+    #[test]
     fn programmatic_field_refresh_is_not_a_rounded_user_edit() {
         let mut fields = Fields::default();
-        fields.programmatic.insert(FieldId::AxisXRange, "0.0000 1.0000".into());
-        assert!(fields.is_programmatic_change(FieldId::AxisXRange, "0.0000 1.0000"));
-        assert!(fields.is_programmatic_change(FieldId::AxisXRange, "0.0000 1.0000"));
-        assert!(!fields.is_programmatic_change(FieldId::AxisXRange, "0.0010 1.0000"));
-        assert!(!fields.is_programmatic_change(FieldId::AxisXRange, "0.0000 1.0000"));
+        let id = FieldId::AxisXRange;
+        fields.committed.insert(id, "0.0000 1.0000".into());
+        assert!(!fields.should_commit(id, &InputEvent::Change, "0.0000 1.0000"));
+        assert!(!fields.should_commit(id, &InputEvent::Blur, "0.0000 1.0000"));
+        assert!(!fields.should_commit(
+            id,
+            &InputEvent::PressEnter { secondary: false, shift: false },
+            "0.0000 1.0000",
+        ));
+        assert!(fields.should_commit(id, &InputEvent::Blur, "0.0010 1.0000"));
     }
 
 
